@@ -4,7 +4,7 @@
 *.pdb
 
 # Cargo
-Cargo.lock
+#Cargo.lock
 # Keep Cargo.lock for binary projects, remove this line if you want to track it
 
 # Debug artifacts
