@@ -11,9 +11,11 @@
     888P"                built with Rust                 
 
 # Jambi
-This is the alpha release and the project is still in early development. Currently looking for feedback and contributors. If you are a developer, you can contribute to the project by submitting pull requests or reporting issues.
+Jambi's mission is to transcribe audio to your clipboard, as quickly and accurately as possible.
 
 Jambi aims to help computer users with disabilities, such as vision or physical impairments, by providing real-time transcription of their speech. It's also a great tool for anyone who wants to transcribe audio quickly and easily.
+
+This is the alpha release and the project is still in early development. Currently looking for feedback and contributors. If you are a developer, you can contribute to the project by submitting pull requests or reporting issues.
 
 ## Features
 
