@@ -17,6 +17,9 @@ Jambi aims to help computer users with disabilities, such as vision or physical 
 
 This is the alpha release and the project is still in early development. Currently looking for feedback and contributors. If you are a developer, you can contribute to the project by submitting pull requests or reporting issues.
 
+If you like the project, please show your support by leaving a star. Thanks!
+
+
 ## Features
 
 - **Real-time transcription** - Processes audio faster than playback speed on CPU
