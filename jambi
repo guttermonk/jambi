@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+
+# Jambi launcher with Vosk support
+# This script ensures all required libraries are available
+
+set -e
+
+# Find the script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Binary path
+JAMBI_BIN="${SCRIPT_DIR}/target/release/jambi"
+
+# Check if binary exists
+if [[ ! -f "$JAMBI_BIN" ]]; then
+    echo "Error: Jambi binary not found at $JAMBI_BIN"
+    echo "Build with: cargo build --release"
+    echo "Or within nix-shell: nix-shell --run 'cargo build --release'"
+    exit 1
+fi
+
+# CRITICAL: Clear and set clean LD_LIBRARY_PATH to avoid 32-bit library conflicts
+# We'll build our own path from scratch with only what we need
+
+# Vosk library path - export for both runtime and build
+export VOSK_LIB_DIR="${HOME}/.cache/jambi/vosk-lib"
+
+# Build library path based on system type
+LIBRARY_PATHS=""
+
+# Helper function to add path to LIBRARY_PATHS
+add_to_library_path() {
+    if [[ -n "$LIBRARY_PATHS" ]]; then
+        LIBRARY_PATHS="$1:$LIBRARY_PATHS"
+    else
+        LIBRARY_PATHS="$1"
+    fi
+}
+
+# On NixOS, find required libraries in nix store
+if [[ -d /nix/store ]]; then
+    # Find OpenSSL 3.x library
+    for dir in /nix/store/*openssl-3*/lib; do
+        if [[ -d "$dir" ]] && [[ -f "$dir/libssl.so.3" ]]; then
+            add_to_library_path "$dir"
+            break
+        fi
+    done
+    
+    # Find bzip2 library
+    for dir in /nix/store/*bzip2*/lib; do
+        if [[ -d "$dir" ]] && [[ -f "$dir/libbz2.so.1" ]] || [[ -f "$dir/libbz2.so.1.0" ]]; then
+            add_to_library_path "$dir"
+            break
+        fi
+    done
+    
+    # Find GCC runtime libraries (libstdc++, etc)
+    GCC_LIB_PATH=""
+    # Try to find gcc-13 first (known to work), then gcc-14 libs - be very specific about 64-bit versions
+    for dir in /nix/store/*gcc-13*-lib/lib /nix/store/*gcc-14*-lib/lib /nix/store/*gcc-12*-lib/lib; do
+        # Skip 32-bit versions and multilib dirs, check for libstdc++.so.6
+        if [[ -d "$dir" ]] && \
+           [[ "$dir" != *"i686"* ]] && \
+           [[ "$dir" != *"i386"* ]] && \
+           [[ "$dir" != *"i586"* ]] && \
+           [[ "$dir" != *"32"* ]] && \
+           [[ -f "$dir/libstdc++.so.6" ]]; then
+            # Verify it's actually a 64-bit library if file command is available
+            if command -v file >/dev/null 2>&1; then
+                if file "$dir/libstdc++.so.6" 2>/dev/null | grep -q "ELF 64-bit"; then
+                    GCC_LIB_PATH="$dir"
+                    # Put GCC libs at the beginning to ensure they're found first
+                    if [[ -n "$LIBRARY_PATHS" ]]; then
+                        LIBRARY_PATHS="$dir:$LIBRARY_PATHS"
+                    else
+                        LIBRARY_PATHS="$dir"
+                    fi
+                    break
+                fi
+            else
+                # If file command not available, trust the path filtering
+                GCC_LIB_PATH="$dir"
+                if [[ -n "$LIBRARY_PATHS" ]]; then
+                    LIBRARY_PATHS="$dir:$LIBRARY_PATHS"
+                else
+                    LIBRARY_PATHS="$dir"
+                fi
+                break
+            fi
+        fi
+    done
+    
+    # Find ALSA library
+    for dir in /nix/store/*alsa-lib*/lib; do
+        if [[ -d "$dir" ]] && [[ -f "$dir/libasound.so.2" ]]; then
+            add_to_library_path "$dir"
+            break
+        fi
+    done
+    
+    # Find zstd library
+    for dir in /nix/store/*zstd*/lib; do
+        if [[ -d "$dir" ]] && [[ -f "$dir/libzstd.so.1" ]]; then
+            add_to_library_path "$dir"
+            break
+        fi
+    done
+    
+    # Add Vosk library path at the end (after system libs)
+    if [[ -n "$LIBRARY_PATHS" ]]; then
+        LIBRARY_PATHS="$LIBRARY_PATHS:${VOSK_LIB_DIR}"
+    else
+        LIBRARY_PATHS="${VOSK_LIB_DIR}"
+    fi
+    
+    if [[ -z "$LIBRARY_PATHS" ]]; then
+        echo "Warning: Could not find required libraries in Nix store"
+        echo "You may need to run this within nix-shell:"
+        echo "  nix-shell --run './jambi $*'"
+        # Try to continue anyway
+    fi
+else
+    # Non-NixOS systems - use standard paths
+    LIBRARY_PATHS="${VOSK_LIB_DIR}:/usr/lib64:/usr/lib/x86_64-linux-gnu:/usr/lib:/usr/local/lib"
+fi
+
+# Set the library path - ensure it's exported properly
+export LD_LIBRARY_PATH="$LIBRARY_PATHS"
+
+# Verify the export worked
+if [[ -z "$LD_LIBRARY_PATH" ]]; then
+    echo "Error: Failed to set LD_LIBRARY_PATH"
+    echo "Trying to find libraries manually..."
+    
+    # Fallback: try to find libraries in standard locations
+    for lib_dir in /usr/local/lib /usr/lib /usr/lib64 /lib /lib64; do
+        if [[ -d "$lib_dir" ]]; then
+            export LD_LIBRARY_PATH="${lib_dir}:${LD_LIBRARY_PATH}"
+        fi
+    done
+fi
+
+# Set logging level
+export RUST_LOG="${RUST_LOG:-info}"
+
+# Check if Vosk library exists
+if [[ ! -f "$VOSK_LIB_DIR/libvosk.so" ]]; then
+    echo "Vosk library not found. Downloading (one-time setup)..."
+    mkdir -p "$VOSK_LIB_DIR"
+    cd "$VOSK_LIB_DIR"
+    
+    # Download appropriate version
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        if command -v wget >/dev/null 2>&1; then
+            wget -q --show-progress "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-linux-x86_64-0.3.45.zip"
+        elif command -v curl >/dev/null 2>&1; then
+            curl -L --progress-bar -o vosk-linux-x86_64-0.3.45.zip "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-linux-x86_64-0.3.45.zip"
+        else
+            echo "Error: Please install wget or curl"
+            exit 1
+        fi
+        
+        if command -v unzip >/dev/null 2>&1; then
+            unzip -q vosk-linux-x86_64-0.3.45.zip
+            mv vosk-linux-x86_64-0.3.45/* . 2>/dev/null || true
+            rm -rf vosk-linux-x86_64-0.3.45*
+        else
+            echo "Error: Please install unzip"
+            exit 1
+        fi
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "macOS support coming soon. Please see GitHub for manual installation."
+        exit 1
+    else
+        echo "Unsupported OS: $OSTYPE"
+        exit 1
+    fi
+    
+    cd "$SCRIPT_DIR"
+    echo "✓ Vosk library downloaded"
+fi
+
+# Check if Vosk model is downloaded (only for first run)
+VOSK_MODEL_DIR="${HOME}/.cache/jambi/vosk-models"
+DEFAULT_MODEL="vosk-model-small-en-us-0.15"
+
+if [[ ! -d "$VOSK_MODEL_DIR/$DEFAULT_MODEL" ]]; then
+    echo "Vosk model not found. Downloading (one-time setup, ~40MB)..."
+    mkdir -p "$VOSK_MODEL_DIR"
+    cd "$VOSK_MODEL_DIR"
+    
+    if command -v wget >/dev/null 2>&1; then
+        wget -q --show-progress "https://alphacephei.com/vosk/models/${DEFAULT_MODEL}.zip"
+    elif command -v curl >/dev/null 2>&1; then
+        curl -L --progress-bar -o "${DEFAULT_MODEL}.zip" "https://alphacephei.com/vosk/models/${DEFAULT_MODEL}.zip"
+    else
+        echo "Error: Please install wget or curl"
+        exit 1
+    fi
+    
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q "${DEFAULT_MODEL}.zip"
+        rm "${DEFAULT_MODEL}.zip"
+    else
+        echo "Error: Please install unzip"
+        exit 1
+    fi
+    
+    cd "$SCRIPT_DIR"
+    echo "✓ Vosk model downloaded"
+fi
+
+# Debug mode - show library paths if JAMBI_DEBUG is set
+if [[ -n "$JAMBI_DEBUG" ]]; then
+    echo "Debug: LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+    echo "Debug: VOSK_LIB_DIR=$VOSK_LIB_DIR"
+    echo "Debug: Running: $JAMBI_BIN $@"
+    echo "Debug: Checking library dependencies with current LD_LIBRARY_PATH:"
+    LD_LIBRARY_PATH="$LD_LIBRARY_PATH" ldd "$JAMBI_BIN" || true
+    echo ""
+fi
+
+# Verify critical libraries can be found
+if ! LD_LIBRARY_PATH="$LD_LIBRARY_PATH" ldd "$JAMBI_BIN" 2>/dev/null | grep -q "not found"; then
+    : # All libraries found, continue
+else
+    echo "Warning: Some libraries are not found. Trying to continue anyway..."
+    if [[ -n "$JAMBI_DEBUG" ]]; then
+        echo "Missing libraries:"
+        LD_LIBRARY_PATH="$LD_LIBRARY_PATH" ldd "$JAMBI_BIN" 2>/dev/null | grep "not found"
+    fi
+fi
+
+# Run Jambi with all arguments
+# Use env to explicitly pass LD_LIBRARY_PATH to avoid issues with exec
+env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" VOSK_LIB_DIR="$VOSK_LIB_DIR" RUST_LOG="$RUST_LOG" "$JAMBI_BIN" "$@"

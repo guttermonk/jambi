@@ -1,0 +1,79 @@
+# Rustfmt configuration for Jambi
+# This ensures consistent code formatting across the project
+
+# Use verbose diffs when formatting
+verbose = false
+
+# Maximum line width
+max_width = 100
+
+# Hard tabs vs spaces
+hard_tabs = false
+
+# Number of spaces per tab
+tab_spaces = 4
+
+# Number of spaces per indentation level
+indent_style = "Block"
+
+# Newline style (Auto, Native, Unix, Windows)
+newline_style = "Unix"
+
+# Use field initialize shorthand if possible
+use_field_init_shorthand = true
+
+# Use try shorthand (?)
+use_try_shorthand = true
+
+# Remove nested parens
+remove_nested_parens = true
+
+# Reorder imports and module declarations
+reorder_imports = true
+reorder_modules = true
+
+# Import grouping and granularity
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+
+# Format code in doc comments
+format_code_in_doc_comments = true
+
+# Format string literals
+format_strings = false
+
+# Format macro matchers
+format_macro_matchers = true
+
+# Format macro bodies
+format_macro_bodies = true
+
+# Normalize comments
+normalize_comments = true
+
+# Wrap comments
+wrap_comments = true
+
+# Comment width
+comment_width = 80
+
+# Merge derives
+merge_derives = true
+
+# Match block trailing comma
+match_block_trailing_comma = false
+
+# Trailing comma in multiline
+trailing_comma = "Vertical"
+
+# Blank lines upper bound
+blank_lines_upper_bound = 1
+
+# Blank lines lower bound  
+blank_lines_lower_bound = 0
+
+# Edition
+edition = "2021"
+
+# Version (One, Two)
+version = "Two"

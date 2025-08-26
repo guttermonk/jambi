@@ -1,0 +1,82 @@
+[package]
+name = "jambi"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance voice transcription tool built with Rust"
+license = "MIT OR Apache-2.0"
+authors = ["Jambi Contributors"]
+repository = "https://github.com/guttermonk/jambi"
+readme = "README.md"
+keywords = ["audio", "transcription", "whisper", "voice", "speech"]
+categories = ["multimedia::audio", "command-line-utilities"]
+default-run = "jambi"
+
+[dependencies]
+# Audio recording
+cpal = "0.15"
+hound = "3.5"
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Speech recognition
+whisper-rs = { version = "0.11", optional = true }
+vosk = "0.3"
+zip = "0.6"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Clipboard integration
+arboard = "3.3"
+
+# HTTP client for model downloading
+reqwest = { version = "0.11", features = ["json", "stream"] }
+futures-util = "0.3"
+
+# Configuration and serialization
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+serde_json = "1.0"
+
+# System directories
+dirs = "5.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI interface
+clap = { version = "4.4", features = ["derive"], optional = true }
+nix = { version = "0.30.1", features = ["signal"] }
+
+[dev-dependencies]
+# For tests
+tempfile = "3.8"
+
+# Main binary
+[[bin]]
+name = "jambi"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[profile.dev]
+debug = true
+opt-level = 0
+
+# Feature flags
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+native-whisper = ["dep:whisper-rs"]
+# openai = ["dep:reqwest"]  # Enable when needed

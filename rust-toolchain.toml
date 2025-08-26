@@ -1,0 +1,24 @@
+# Rust toolchain configuration for Jambi
+# This ensures consistent Rust version and components across all environments
+
+[toolchain]
+# Use stable Rust channel
+channel = "stable"
+
+# Components to install
+components = [
+    "rustfmt",      # Code formatting
+    "clippy",       # Linting
+    "rust-src",     # Source code (fixes sysroot issues)
+    "rust-docs",    # Documentation
+    "rust-analyzer", # IDE support
+]
+
+# Optional: specify exact version for reproducible builds
+# channel = "1.75.0"
+
+# Profile to use
+profile = "default"
+
+# Targets to install (optional)
+# targets = ["x86_64-unknown-linux-gnu"]

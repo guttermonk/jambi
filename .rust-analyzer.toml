@@ -1,0 +1,67 @@
+# rust-analyzer configuration for Jambi project
+# This file helps rust-analyzer work properly with Zed editor on NixOS
+
+[cargo]
+# Enable build scripts (important for build.rs)
+buildScripts.enable = true
+buildScripts.useRustcWrapper = true
+# Load build artifacts from cargo check
+loadOutDirsFromCheck = true
+# Run build scripts during check
+runBuildScripts = true
+# Don't use all features by default
+allFeatures = false
+# Use default features
+noDefaultFeatures = false
+# Target directory for rust-analyzer
+targetDir = "target/rust-analyzer"
+
+[procMacro]
+# Enable procedural macros
+enable = true
+# Enable derive macros
+attributes.enable = true
+
+[checkOnSave]
+# Enable checking on save
+enable = true
+# Use cargo check instead of clippy (faster)
+command = "check"
+# Check all targets
+allTargets = true
+# Extra arguments for cargo check
+extraArgs = []
+
+[diagnostics]
+# Enable diagnostics
+enable = true
+# Disable experimental diagnostics
+experimental.enable = false
+
+[rustfmt]
+# Enable range formatting
+enableRangeFormatting = true
+
+[inlayHints]
+# Enable inlay hints
+enable = true
+# Show type hints
+typeHints.enable = true
+# Show parameter hints
+parameterHints.enable = true
+
+[server]
+# Extra environment variables for rust-analyzer
+extraEnv = { VOSK_LIB_DIR = "$HOME/.cache/jambi/vosk-lib", RUST_LOG = "warn" }
+
+[rust]
+# Let rust-analyzer discover the sysroot automatically
+analyzerTargetDir = "target/rust-analyzer"
+
+[lens]
+# Enable code lens (Run | Debug buttons)
+enable = true
+run.enable = true
+debug.enable = true
+implementations.enable = true
+references.enable = true

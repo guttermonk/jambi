@@ -1,0 +1,110 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+Cargo.lock
+# Keep Cargo.lock for binary projects, remove this line if you want to track it
+
+# Debug artifacts
+*.dSYM/
+*.so
+*.dylib
+*.dll
+*.exe
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-workspace
+*.sublime-project
+.project
+.classpath
+.settings/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project-specific
+/config.toml
+!config.example.toml
+/jambi_recordings/
+/recordings/
+/scripts/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+
+# Cache and temporary files
+.cache/
+*.tmp
+*.temp
+/tmp/
+.tmp/
+
+# Vosk models and libraries (downloaded at runtime)
+vosk-models/
+vosk-lib/
+*.model
+
+# Backup files
+*.backup
+*.bak
+*.orig
+*.old
+
+# Test outputs
+test_output/
+test_results/
+*.test
+
+# Documentation build
+/doc/
+/docs/_build/
+*.pdf
+
+# Python (for any Python scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Nix
+result
+result-*
+
+# Coverage reports
+*.profraw
+*.profdata
+/coverage/
+*.lcov
+
+# Misc
+.history/
+.directory

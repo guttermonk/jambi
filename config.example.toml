@@ -1,0 +1,42 @@
+# Jambi Configuration File
+# Fast transcription using Vosk speech recognition
+
+[audio]
+sample_rate = 16000
+channels = 1
+buffer_size = 1024
+output_dir = "~/jambi_recordings"
+# max_duration = 300  # Optional: uncomment to set max recording duration
+
+[vosk]
+# Vosk model selection
+# Available models:
+# - SmallEnUs: Small US English model (40MB) - fastest, good accuracy
+# - LargeEnUs: Large US English model (1.8GB) - best accuracy
+# - SmallEnIn: Small Indian English model (40MB)
+# - SmallCn: Small Chinese model (40MB)
+# - SmallRu: Small Russian model (40MB)
+# - SmallFr: Small French model (40MB)
+# - SmallDe: Small German model (40MB)
+# - SmallEs: Small Spanish model (40MB)
+# - SmallPt: Small Portuguese model (40MB)
+# - SmallIt: Small Italian model (40MB)
+# - SmallNl: Small Dutch model (40MB)
+# - SmallJa: Small Japanese model (40MB)
+model = "SmallEnUs"
+
+# Sample rate for audio processing (typically 16000)
+sample_rate = 16000.0
+
+# Maximum alternatives to return (0 for single result)
+max_alternatives = 0
+
+# Whether to return word-level timestamps
+show_words = true
+
+# Whether to return partial results during recognition
+partial_results = true
+
+# Top-level application settings
+auto_copy = true
+keep_recordings = false

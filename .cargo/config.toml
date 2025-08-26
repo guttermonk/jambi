@@ -1,0 +1,44 @@
+# Cargo configuration for Jambi
+# This helps with build issues and IDE integration
+
+[build]
+# Number of parallel jobs
+jobs = 4
+
+# Build with optimizations even in dev mode for better performance
+[profile.dev]
+opt-level = 2
+
+# Release build optimizations
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# Custom profile for benchmarking
+[profile.bench]
+inherits = "release"
+debug = true
+
+# Alias for common commands
+[alias]
+b = "build --release"
+r = "run --release"
+t = "test"
+c = "check"
+d = "doc --open"
+
+# Registry configuration
+[registries.crates-io]
+protocol = "sparse"
+
+# Network configuration
+[net]
+retry = 2
+git-fetch-with-cli = false
+
+# Term configuration for better output
+[term]
+verbose = false
+color = "auto"
