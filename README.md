@@ -11,7 +11,7 @@
     888P"                built with Rust                 
 
 # Jambi
-Jambi's mission is to transcribe audio to your clipboard, as quickly and accurately as possible.
+Jambi's mission is to transcribe audio to your clipboard, as quickly and accurately as possible, while staying privacy-focused and open-source.
 
 Jambi aims to help computer users with disabilities, such as vision or physical impairments, by providing real-time transcription of their speech. It's also a great tool for anyone who wants to transcribe audio quickly and easily.
 
