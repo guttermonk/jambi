@@ -21,7 +21,7 @@ Jambi aims to help computer users with disabilities, such as vision or physical 
 - **Small footprint** - Only 40MB model size (vs 75MB+ for Whisper)
 - **Low latency** - Instant results without GPU requirements
 - **Multiple languages** - Supports 12+ languages including English, Spanish, French, German, Chinese, etc.
-- **Privacy-focused** - Everything runs locally, no cloud services required
+- **Privacy-focused** - Everything runs locally after initial setup, no cloud services required
 
 ## Quick Start
 
