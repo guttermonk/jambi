@@ -11,7 +11,7 @@
     888P"                built with Rust                 
 
 # Jambi
-This is the alpha release and still in development. Currently looking for feedback and contributors. If you are a developer, you can contribute to the project by submitting pull requests or reporting issues.
+This is the alpha release and the project is still in early development. Currently looking for feedback and contributors. If you are a developer, you can contribute to the project by submitting pull requests or reporting issues.
 
 Jambi aims to help computer users with disabilities, such as vision or physical impairments, by providing real-time transcription of their speech. It's also a great tool for anyone who wants to transcribe audio quickly and easily.
 
@@ -105,6 +105,13 @@ Start Jambi in interactive mode for recording and transcription:
 Record audio and transcribe it:
 ```bash
 ./jambi record
+# Press Enter to start, Enter again to stop
+```
+
+#### Live transcription
+Speak freely while your words are converted to text:
+```bash
+./jambi record --live
 # Press Enter to start, Enter again to stop
 ```
 
