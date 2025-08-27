@@ -30,6 +30,8 @@
           # System libraries
           openssl
           pkg-config
+          stdenv.cc.cc
+          bzip2
           
           # Runtime dependencies
           sox
