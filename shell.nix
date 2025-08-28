@@ -14,6 +14,10 @@ let
 
   # System libraries needed for building
   systemLibs = with pkgs; [
+    # System libraries
+    bzip2
+    stdenv.cc.cc
+
     # Audio support
     alsa-lib
     alsa-lib.dev
