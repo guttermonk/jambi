@@ -24,7 +24,7 @@
         voskVersion = "0.3.45";
         voskLibrary = pkgs.fetchzip {
           url = "https://github.com/alphacep/vosk-api/releases/download/v${voskVersion}/vosk-linux-x86_64-${voskVersion}.zip";
-          sha256 = "sha256-H/6C5ApI2riPSXQCgd+5FIZxrlT+yLTDNxALlXcQNdE=";  # You'll need to update this
+          sha256 = "sha256-ToMDbD5ooFMHU0nNlfpLynF29kkfMknBluKO5PipLFY=";  # You'll need to update this
           stripRoot = true;
         };
         
