@@ -20,6 +20,14 @@
           extensions = [ "rust-src" "clippy" "rustfmt" ];
         };
 
+        # Vosk library - fetch as a fixed-output derivation
+        voskVersion = "0.3.45";
+        voskLibrary = pkgs.fetchzip {
+          url = "https://github.com/alphacep/vosk-api/releases/download/v${voskVersion}/vosk-linux-x86_64-${voskVersion}.zip";
+          sha256 = "sha256-H/6C5ApI2riPSXQCgd+5FIZxrlT+yLTDNxALlXcQNdE=";  # You'll need to update this
+          stripRoot = true;
+        };
+        
         # Build inputs
         commonBuildInputs = with pkgs; [
           # Audio libraries
@@ -55,25 +63,15 @@
             rustToolchain
             pkg-config
             makeWrapper
-            wget
-            unzip
           ];
 
           buildInputs = commonBuildInputs;
 
-          # Download and set up vosk library before build
+          # Set up vosk library before build
           preBuild = ''
-            export VOSK_VERSION="0.3.45"
-            export VOSK_DIR="$TMPDIR/vosk"
-            mkdir -p "$VOSK_DIR"
-            
-            echo "Downloading vosk library..."
-            ${pkgs.wget}/bin/wget -q "https://github.com/alphacep/vosk-api/releases/download/v$VOSK_VERSION/vosk-linux-x86_64-$VOSK_VERSION.zip" -O "$VOSK_DIR/vosk.zip"
-            ${pkgs.unzip}/bin/unzip -q "$VOSK_DIR/vosk.zip" -d "$VOSK_DIR"
-            
-            export VOSK_LIB_DIR="$VOSK_DIR/vosk-linux-x86_64-$VOSK_VERSION"
-            export RUSTFLAGS="-L $VOSK_LIB_DIR"
-            export LD_LIBRARY_PATH="$VOSK_LIB_DIR:$LD_LIBRARY_PATH"
+            export VOSK_LIB_DIR="${voskLibrary}"
+            export RUSTFLAGS="-L ${voskLibrary}"
+            export LD_LIBRARY_PATH="${voskLibrary}:$LD_LIBRARY_PATH"
           '';
 
           # Environment variables for build
@@ -83,7 +81,7 @@
           postInstall = ''
             # Copy vosk library to output
             mkdir -p $out/lib
-            cp $VOSK_LIB_DIR/libvosk.so $out/lib/ || true
+            cp $VOSK_LIB_DIR/libvosk.so $out/lib/
             
             wrapProgram $out/bin/jambi \
               --prefix PATH : ${pkgs.lib.makeBinPath (with pkgs; [ sox wl-clipboard xclip ])} \
