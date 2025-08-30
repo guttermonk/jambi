@@ -16,7 +16,6 @@ use tokio::time::timeout;
 use tracing::{info, warn, error};
 
 mod audio;
-mod whisper;
 mod config;
 mod vosk_engine;
 
@@ -1033,19 +1032,7 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_model_name() {
-        assert_eq!(parse_model_name("tiny").unwrap(), WhisperModel::Tiny);
-        assert_eq!(parse_model_name("distil-small").unwrap(), WhisperModel::DistilSmall);
-        assert_eq!(parse_model_name("large-v3").unwrap(), WhisperModel::Large);
-    }
-
-    #[test]
-    fn test_format_srt_time() {
-        assert_eq!(format_srt_time(0.0), "00:00:00,000");
-        assert_eq!(format_srt_time(65.5), "00:01:05,500");
-        assert_eq!(format_srt_time(3661.250), "01:01:01,250");
-    }
+    // Whisper-related tests removed - using Vosk instead
 
     #[test]
     fn test_truncate_string() {

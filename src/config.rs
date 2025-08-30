@@ -4,12 +4,10 @@
 //! configuration from various sources including files, environment variables,
 //! and command-line arguments.
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-
-use crate::whisper::WhisperModel;
+// Whisper model imports removed - using Vosk instead
 
 /// Main application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,33 +60,26 @@ impl Default for AudioConfig {
     }
 }
 
-/// Transcription configuration
+/// Transcription configuration (for Vosk engine)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionConfig {
-    /// Whisper model to use
-    #[serde(with = "model_serde")]
-    pub model: WhisperModel,
     /// Device for inference (cpu, cuda, metal)
     pub device: DeviceType,
     /// Language for transcription (None for auto-detect)
     pub language: Option<String>,
-    /// Temperature for sampling (0.0 for deterministic)
-    pub temperature: f32,
-    /// Number of beams for beam search
-    pub num_beams: usize,
-    /// Maximum number of tokens to generate
-    pub max_tokens: usize,
+    /// Sample rate for audio processing
+    pub sample_rate: u32,
+    /// Enable automatic punctuation
+    pub auto_punctuation: bool,
 }
 
 impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
-            model: WhisperModel::Tiny,
             device: DeviceType::Auto,
             language: Some("en".to_string()),
-            temperature: 0.0,
-            num_beams: 1,
-            max_tokens: 448,
+            sample_rate: 16000,
+            auto_punctuation: true,
         }
     }
 }
@@ -146,66 +137,134 @@ fn default_recordings_dir() -> PathBuf {
         .join("recordings")
 }
 
-/// Parse model name from string
-pub fn parse_model_name(name: &str) -> Result<WhisperModel> {
-    match name.to_lowercase().trim() {
-        "tiny" => Ok(WhisperModel::Tiny),
-        "base" => Ok(WhisperModel::Base),
-        "small" => Ok(WhisperModel::Small),
-        "medium" => Ok(WhisperModel::Medium),
-        "large" => Ok(WhisperModel::Large),
-        "distil-small" | "distil-small.en" => Ok(WhisperModel::DistilSmall),
-        "distil-medium" | "distil-medium.en" => Ok(WhisperModel::DistilMedium),
-        _ => Err(anyhow::anyhow!("Unknown model: {}", name)),
-    }
-}
+// Model parsing removed - Vosk uses different model management
 
-
-
-// Serde support for WhisperModel
-mod model_serde {
-    use super::*;
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S>(model: &WhisperModel, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&model.to_string())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<WhisperModel, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        parse_model_name(&s).map_err(serde::de::Error::custom)
-    }
-}
+// Model serde support removed - Vosk uses different model management
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use tempfile::NamedTempFile;
+    
+    // Test-only helpers
+    impl DeviceType {
+        fn description(&self) -> &'static str {
+            match self {
+                DeviceType::Cpu => "CPU processing",
+                DeviceType::Cuda => "CUDA GPU processing",
+                DeviceType::Metal => "Metal GPU processing (macOS)",
+                DeviceType::Auto => "Auto-select best device",
+            }
+        }
+    }
+
+    fn default_config_path() -> PathBuf {
+        dirs::config_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+            .unwrap_or_else(|| std::env::temp_dir())
+            .join("jambi")
+            .join("config.toml")
+    }
+
+    fn parse_bool(s: &str) -> Result<bool> {
+        match s.to_lowercase().trim() {
+            "true" | "t" | "yes" | "y" | "1" | "on" => Ok(true),
+            "false" | "f" | "no" | "n" | "0" | "off" | "" => Ok(false),
+            _ => Err(anyhow::anyhow!("Invalid boolean value: {}", s)),
+        }
+    }
+
+    struct ConfigBuilder {
+        config: Config,
+    }
+
+    impl ConfigBuilder {
+        fn new() -> Self {
+            Self {
+                config: Config::default(),
+            }
+        }
+        
+        fn language(mut self, language: String) -> Self {
+            self.config.transcription.language = Some(language);
+            self
+        }
+        
+        fn device(mut self, device: DeviceType) -> Self {
+            self.config.transcription.device = device;
+            self
+        }
+        
+        fn auto_copy(mut self, auto_copy: bool) -> Self {
+            self.config.app.auto_copy = auto_copy;
+            self
+        }
+        
+        fn build(self) -> Config {
+            self.config
+        }
+    }
+
+    struct ConfigLoader {
+        config: Config,
+    }
+
+    impl ConfigLoader {
+        fn new() -> Self {
+            Self {
+                config: Config::default(),
+            }
+        }
+        
+        fn from_file(mut self, path: &std::path::Path) -> Result<Self> {
+            let content = std::fs::read_to_string(path)?;
+            self.config = toml::from_str(&content)?;
+            Ok(self)
+        }
+        
+        fn validate(self) -> Result<Self> {
+            // Validate sample rate
+            if self.config.audio.sample_rate < 8000 || self.config.audio.sample_rate > 48000 {
+                return Err(anyhow::anyhow!("Sample rate must be between 8000 and 48000 Hz"));
+            }
+            
+            // Validate channels
+            if self.config.audio.channels == 0 || self.config.audio.channels > 2 {
+                return Err(anyhow::anyhow!("Channels must be 1 (mono) or 2 (stereo)"));
+            }
+            
+            // Validate buffer size
+            if self.config.audio.buffer_size < 128 || self.config.audio.buffer_size > 8192 {
+                return Err(anyhow::anyhow!("Buffer size must be between 128 and 8192"));
+            }
+            
+            Ok(self)
+        }
+        
+        fn build(self) -> Config {
+            self.config
+        }
+    }
 
     #[test]
     fn test_config_defaults() {
         let config = Config::default();
         assert_eq!(config.audio.sample_rate, 16000);
         assert_eq!(config.audio.channels, 1);
-        assert_eq!(config.transcription.model, WhisperModel::DistilSmall);
+        assert_eq!(config.transcription.sample_rate, 16000);
         assert!(config.app.auto_copy);
     }
 
     #[test]
     fn test_config_builder() {
         let config = ConfigBuilder::new()
-            .model(WhisperModel::Small)
+            .language("en".to_string())
             .device(DeviceType::Cpu)
             .auto_copy(false)
             .build();
 
-        assert_eq!(config.transcription.model, WhisperModel::Small);
+        assert_eq!(config.transcription.language, Some("en".to_string()));
         assert_eq!(config.transcription.device, DeviceType::Cpu);
         assert!(!config.app.auto_copy);
     }
@@ -216,13 +275,7 @@ mod tests {
         assert_eq!(DeviceType::Auto.description(), "Auto-select best device");
     }
 
-    #[test]
-    fn test_parse_model_name() {
-        assert_eq!(parse_model_name("tiny").unwrap(), WhisperModel::Tiny);
-        assert_eq!(parse_model_name("distil-small").unwrap(), WhisperModel::DistilSmall);
-        assert_eq!(parse_model_name("large-v3").unwrap(), WhisperModel::Large);
-        assert!(parse_model_name("invalid").is_err());
-    }
+    // Model parsing tests removed - Vosk uses different model management
 
     #[test]
     fn test_parse_bool() {
@@ -242,7 +295,7 @@ mod tests {
         let deserialized: Config = toml::from_str(&toml_str).unwrap();
         
         assert_eq!(config.audio.sample_rate, deserialized.audio.sample_rate);
-        assert_eq!(config.transcription.model, deserialized.transcription.model);
+        assert_eq!(config.transcription.sample_rate, deserialized.transcription.sample_rate);
     }
 
     #[test]
@@ -277,11 +330,10 @@ buffer_size = 2048
 output_dir = "/tmp/test"
 
 [transcription]
-model = "small"
 device = "cpu"
-temperature = 0.5
-num_beams = 2
-max_tokens = 512
+language = "en"
+sample_rate = 16000
+auto_punctuation = true
 
 [app]
 auto_copy = false
@@ -300,8 +352,8 @@ auto_start_recording = true
         assert_eq!(config.audio.sample_rate, 22050);
         assert_eq!(config.audio.channels, 2);
         assert_eq!(config.audio.buffer_size, 2048);
-        assert_eq!(config.transcription.model, WhisperModel::Small);
-        assert_eq!(config.transcription.temperature, 0.5);
+        assert_eq!(config.transcription.sample_rate, 16000);
+        assert!(config.transcription.auto_punctuation);
         assert!(!config.app.auto_copy);
         assert!(config.app.keep_recordings);
     }

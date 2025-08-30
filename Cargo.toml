@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 authors = ["Jambi Contributors"]
 repository = "https://github.com/guttermonk/jambi"
 readme = "README.md"
-keywords = ["audio", "transcription", "whisper", "voice", "speech"]
+keywords = ["audio", "transcription", "vosk", "voice", "speech"]
 categories = ["multimedia::audio", "command-line-utilities"]
 default-run = "jambi"
 
@@ -20,7 +20,6 @@ hound = "3.5"
 tokio = { version = "1.0", features = ["full"] }
 
 # Speech recognition
-whisper-rs = { version = "0.11", optional = true }
 vosk = "0.3"
 zip = "0.6"
 
@@ -78,5 +77,4 @@ opt-level = 0
 [features]
 default = ["cli"]
 cli = ["dep:clap"]
-native-whisper = ["dep:whisper-rs"]
 # openai = ["dep:reqwest"]  # Enable when needed

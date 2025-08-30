@@ -1,21 +1,19 @@
-//! Jambi - High-Performance Voice Transcription Library
+//! Jambi - Voice Transcription Library
 //!
-//! A blazing-fast voice transcription library built with Rust, providing
-//! superior performance over traditional Python implementations.
+//! A native Rust voice transcription library using the Vosk speech recognition engine.
 //!
 //! # Features
 //!
-//! - **Native Performance**: 5-10x faster than Python implementations
-//! - **Zero Dependencies**: No Python runtime required
-//! - **Real Audio Processing**: Cross-platform audio recording with CPAL
-//! - **ML Integration**: Whisper models via Candle framework
-//! - **Memory Efficient**: Precise memory control without garbage collection
-//! - **Production Ready**: Comprehensive error handling and logging
+//! - **Native Performance**: Fast startup and low memory usage
+//! - **Cross-platform**: Works on Linux, macOS, and Windows
+//! - **Audio Recording**: Built-in audio recording with CPAL
+//! - **Vosk Integration**: Lightweight speech recognition
+//! - **Simple API**: Easy to use async/await interface
 //!
 //! # Quick Start
 //!
 //! ```rust,no_run
-//! use jambi::{AudioRecorder, WhisperEngine, AudioConfig, TranscriptionConfig};
+//! use jambi::{AudioRecorder, AudioConfig, VoskEngine, VoskConfig};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,47 +21,30 @@
 //!     let audio_config = AudioConfig::default();
 //!     let mut recorder = AudioRecorder::new(audio_config)?;
 //!
-//!     // Set up transcription
-//!     let transcription_config = TranscriptionConfig::default();
-//!     let mut engine = WhisperEngine::new(transcription_config)?;
+//!     // Set up Vosk transcription
+//!     let vosk_config = VoskConfig::default();
+//!     let mut engine = VoskEngine::new(vosk_config)?;
+//!     engine.load_model().await?;
 //!
-//!     // Record audio
-//!     let recording_id = recorder.start_recording()?;
-//!     // ... wait for recording ...
-//!     let recording_info = recorder.stop_recording()?;
-//!
-//!     // Transcribe
-//!     let result = engine.transcribe_file(&recording_info.file_path).await?;
+//!     // Record and transcribe
+//!     let recording = recorder.record_audio().await?;
+//!     let result = engine.transcribe_file(&recording.file_path).await?;
 //!     println!("Transcription: {}", result.text);
 //!
 //!     Ok(())
 //! }
 //! ```
 //!
-//! # Architecture
+//! # Modules
 //!
-//! The library is organized into several key modules:
-//!
-//! - [`audio`] - Cross-platform audio recording with CPAL
-//! - [`whisper`] - Whisper model integration with Candle ML framework
-//! - [`config`] - Configuration management and validation
-//!
-//! # Performance
-//!
-//! Jambi provides significant performance improvements over Python implementations:
-//!
-//! | Metric | Python | Jambi | Improvement |
-//! |--------|--------|-------|-------------|
-//! | Startup Time | 3-5s | 0.5-1s | 5-10x faster |
-//! | Memory Usage | 500MB+ | 150-250MB | 50-70% reduction |
-//! | CPU Usage | High | Low-Medium | 30-50% reduction |
-//! | Binary Size | N/A | ~15-30MB | Single binary |
+//! - [`audio`] - Cross-platform audio recording
+//! - [`vosk_engine`] - Vosk speech recognition integration
+//! - [`config`] - Configuration management
 
 use anyhow::Result;
 use std::path::Path;
 
 pub mod audio;
-pub mod whisper;
 pub mod config;
 pub mod vosk_engine;
 
@@ -179,7 +160,7 @@ pub fn copy_to_clipboard_nonblocking(text: &str) -> anyhow::Result<()> {
 
 // Re-export main types for convenience
 pub use audio::{AudioRecorder, AudioConfig, RecordingInfo, RecordingState};
-pub use whisper::{WhisperEngine, TranscriptionConfig, TranscriptionResult, WhisperModel};
+pub use vosk_engine::{VoskEngine, VoskConfig, VoskModel};
 pub use config::*;
 
 
