@@ -85,7 +85,7 @@
             
             wrapProgram $out/bin/jambi \
               --prefix PATH : ${pkgs.lib.makeBinPath (with pkgs; [ sox wl-clipboard xclip ])} \
-              --prefix LD_LIBRARY_PATH : $out/lib \
+              --prefix LD_LIBRARY_PATH : "$out/lib:${pkgs.stdenv.cc.cc.lib}/lib" \
               --set ALSA_PCM_CARD default \
               --set ALSA_PCM_DEVICE 0
           '';
