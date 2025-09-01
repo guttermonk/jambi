@@ -321,3 +321,33 @@ A: Yes, everything runs locally on your machine. No internet connection required
 
 **Q: How accurate is it?**
 A: Vosk provides good accuracy for real-time transcription. For highest accuracy with more processing time, consider using Whisper models instead.
+
+**Q: In Hyprland, how do I make Jambi open in the same workspace every time?**
+A: Yes, you can use Hyprland's window rules feature to achieve this. For example, if you always want Jambi to open in the Special Workspace, add the following line to your `~/.config/hypr/hyprland.conf` file:
+```
+windowrulev2 = workspace special silent, class:jambi
+```
+
+**Q: In Hyprland, is there a way to only allow one instance of Jambi to run at a time?**
+A: Yes, you can launch Jambi with the following script, which will check to see if Jambi is already running before starting a new instance:
+```bash
+#!usr/bin/env bash
+
+    if hyprctl clients | grep -q "class: jambi"; then
+      workspace=$(hyprctl clients | grep "class: jambi" -B4 | grep "workspace:" | head -n1 | awk '{print $2}')
+      if [[ "$workspace" == "-99" ]]; then
+        hyprctl dispatch togglespecialworkspace
+      else
+        hyprctl dispatch workspace $workspace
+      fi
+    else
+      kitty --class jambi -e jambi record --live &
+      sleep 0.5
+      workspace=$(hyprctl clients | grep "class: jambi" -B4 | grep "workspace:" | head -n1 | awk '{print $2}')
+      if [[ "$workspace" == "-99" ]]; then
+        hyprctl dispatch togglespecialworkspace
+      else
+        hyprctl dispatch workspace $workspace
+      fi
+    fi
+```
