@@ -2,22 +2,31 @@
   description = "Jambi - a blazing-fast voice transcription application built with Rust";
 
   inputs = {
+    # No rust-overlay: the toolchain comes from nixpkgs so that a consumer can
+    # set `inputs.jambi.inputs.nixpkgs.follows` and have it actually work.
+    #
+    # That matters for more than tidiness. jambi captures audio through ALSA,
+    # and on a PipeWire system ALSA reaches the server by dlopen'ing
+    # libasound_module_pcm_pipewire.so, whose absolute path is baked into
+    # /etc/alsa/conf.d by the host. That plugin is built against the host's
+    # alsa-lib, so if jambi's alsa-lib comes from a different nixpkgs the
+    # dlopen fails and the default capture device cannot be opened at all --
+    # ALSA reports only "cannot be opened or _snd_pcm_pipewire_open was not
+    # defined inside". Following the host nixpkgs keeps one alsa-lib in play
+    # and avoids the whole class of problem.
+    #
+    # rust-toolchain.toml asks for "stable" with no version pin, so nixpkgs'
+    # rustc satisfies it; that file is now only consulted by rustup-based
+    # (non-Nix) setups.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
-          inherit system overlays;
-        };
-
-        # Rust toolchain
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "rust-src" "clippy" "rustfmt" ];
+          inherit system;
         };
 
         # Vosk library - fetch as a fixed-output derivation
@@ -64,8 +73,9 @@
             lockFile = ./Cargo.lock;
           };
 
+          # No toolchain listed: buildRustPackage brings nixpkgs' cargo/rustc
+          # in itself, and adding a second one here would shadow it.
           nativeBuildInputs = with pkgs; [
-            rustToolchain
             pkg-config
             makeWrapper
           ];
@@ -87,10 +97,18 @@
             # Copy vosk library to output
             mkdir -p $out/lib
             cp $VOSK_LIB_DIR/libvosk.so $out/lib/
-            
+
+            # Notification glyph. Shipped untinted (white strokes) so it reads
+            # on a dark panel anywhere; JAMBI_ICON is only the default, and
+            # `dictate.icon` in config.toml overrides it -- which is how a
+            # themed desktop points at its own recoloured copy instead.
+            mkdir -p $out/share/jambi
+            cp ${./assets/microphone.svg} $out/share/jambi/microphone.svg
+
             wrapProgram $out/bin/jambi \
               --prefix PATH : ${pkgs.lib.makeBinPath (with pkgs; [ sox wl-clipboard xclip wtype xdotool libnotify ])} \
               --prefix LD_LIBRARY_PATH : "$out/lib:${pkgs.stdenv.cc.cc.lib}/lib" \
+              --set-default JAMBI_ICON "$out/share/jambi/microphone.svg" \
               --set ALSA_PCM_CARD default \
               --set ALSA_PCM_DEVICE 0
           '';
@@ -113,7 +131,10 @@
         # Development shell
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ (with pkgs; [
-            rustToolchain
+            rustc
+            cargo
+            clippy
+            rustfmt
             rust-analyzer
             bacon
             cargo-watch
@@ -123,7 +144,7 @@
           ]);
 
           PKG_CONFIG_PATH = "${pkgs.lib.makeSearchPath "lib/pkgconfig" commonBuildInputs}";
-          RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+          RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           RUST_BACKTRACE = "1";
           ALSA_PCM_CARD = "default";
           ALSA_PCM_DEVICE = "0";

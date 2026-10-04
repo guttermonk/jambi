@@ -216,7 +216,28 @@ output_dir = "~/jambi_recordings"
 [dictate]            # only used when mode = "live"
 modifier_grace_ms = 250  # wait for hotkey modifiers to lift before typing
 type_delay_ms = 10       # per-keystroke delay for wtype/xdotool
+# icon = "/home/you/.icons/microphone.svg"  # see Notifications below
 ```
+
+### Notifications
+
+A dictation cycle reports itself through `notify-send`, replacing its own
+popup rather than stacking: listening, then done, or the specific failure
+(microphone unavailable, no speech detected, typing failed with the text
+left on the clipboard). These matter more than usual in live mode, since it
+runs detached from a keybind and nothing else would surface an error.
+
+Notifications carry a microphone glyph, shipped in `assets/` with white
+strokes so it reads on a dark panel. If your desktop recolours its icons,
+point `dictate.icon` at its copy instead and the notification follows your
+palette:
+```toml
+[dictate]
+icon = "/home/you/.icons/microphone.svg"
+```
+The path is resolved each time a notification fires, so a theme switch needs
+no restart. A path that does not exist falls back to no icon rather than a
+broken image.
 
 ### Command-Line Mode Override
 

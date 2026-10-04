@@ -179,6 +179,16 @@ pub struct DictateConfig {
     /// covering the case where the key is released while the model is loading.
     #[serde(default = "default_stop_wait_ms")]
     pub stop_wait_ms: u64,
+
+    /// Absolute path to the icon shown on notifications. Falls back to
+    /// JAMBI_ICON (the glyph the package ships) when unset, and to no icon at
+    /// all when neither names a file that exists.
+    ///
+    /// Worth setting on a themed desktop: point it at the recoloured copy the
+    /// theme generates and the notification follows the palette instead of
+    /// staying the shipped white.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 fn default_modifier_grace_ms() -> u64 {
@@ -199,6 +209,7 @@ impl Default for DictateConfig {
             modifier_grace_ms: default_modifier_grace_ms(),
             type_delay_ms: default_type_delay_ms(),
             stop_wait_ms: default_stop_wait_ms(),
+            icon: None,
         }
     }
 }

@@ -17,7 +17,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::vosk_engine::{VoskConfig, VoskEngine};
 use crate::{DictateConfig, Mode};
@@ -88,7 +88,7 @@ pub async fn start(
         // second tap while the first recording is still open would otherwise
         // stack recorders onto the same microphone.
         warn!("dictation already running as pid {}", existing);
-        notify("⚠️ Already recording");
+        notify(&dictate_config, "⚠️ Already recording");
         return Ok(());
     }
 
@@ -115,7 +115,7 @@ pub async fn start(
     // and clip the first word.
     let mut engine = VoskEngine::new(vosk_config)?;
 
-    notify("🎤 Listening...");
+    notify(&dictate_config, "🎤 Listening...");
 
     let stop = async move {
         tokio::select! {
@@ -127,11 +127,24 @@ pub async fn start(
 
     // Callbacks are no-ops here: nothing is watching stdout, and the partial
     // text would be half-recognised anyway. Only the final string is wanted.
-    let result = engine.transcribe_stream(stop, |_| {}, |_| {}).await?;
+    //
+    // Failures are notified rather than just returned. This runs detached from
+    // a keybind, so stderr goes nowhere the user will ever look: without this
+    // a microphone that cannot be opened looks identical to one that heard
+    // nothing -- the "Listening..." popup appears and then silence, with no
+    // hint that anything broke.
+    let result = match engine.transcribe_stream(stop, |_| {}, |_| {}).await {
+        Ok(result) => result,
+        Err(e) => {
+            error!("dictation failed: {:#}", e);
+            notify(&dictate_config, "❌ Recording failed - check the microphone");
+            return Err(e);
+        }
+    };
 
     if result.text.is_empty() {
         info!("no speech recognised");
-        notify("❌ No speech detected");
+        notify(&dictate_config, "❌ No speech detected");
         return Ok(());
     }
 
@@ -168,8 +181,14 @@ pub async fn stop(mode: Mode, dictate_config: &DictateConfig) -> Result<()> {
             break pid;
         }
         if started.elapsed() >= deadline {
+            // Reached either because no recording was running, or because the
+            // one that was died on its own -- a microphone that cannot be
+            // opened being the usual reason. "No recording in progress" read
+            // as a denial of something the user had just plainly started, so
+            // this states the outcome instead of arguing about the premise;
+            // the recorder itself notifies the specific failure.
             warn!("no dictation process found after {:?}", deadline);
-            notify("❌ No recording in progress");
+            notify(dictate_config, "⏹️ Recording already stopped");
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -182,20 +201,41 @@ pub async fn stop(mode: Mode, dictate_config: &DictateConfig) -> Result<()> {
     Ok(())
 }
 
-/// Put the text where the user is typing, falling back to the clipboard.
-fn notify(body: &str) {
+/// Icon shown on notifications: `dictate.icon` if set, otherwise the glyph the
+/// package ships via JAMBI_ICON. Returns None rather than a missing path so a
+/// stale setting degrades to a plain notification instead of a broken image.
+fn icon(config: &DictateConfig) -> Option<String> {
+    config
+        .icon
+        .clone()
+        .or_else(|| std::env::var("JAMBI_ICON").ok())
+        .filter(|path| {
+            let present = std::path::Path::new(path).exists();
+            if !present {
+                debug!("notification icon {} does not exist, omitting", path);
+            }
+            present
+        })
+}
+
+fn notify(config: &DictateConfig, body: &str) {
+    let mut args: Vec<String> = Vec::new();
+
+    if let Some(path) = icon(config) {
+        args.push("-i".into());
+        args.push(path);
+    }
+
     // Replace the previous popup instead of stacking: a dictation cycle emits
     // several of these in a row and they describe one operation, not many.
-    let _ = std::process::Command::new("notify-send")
-        .args([
-            "-h",
-            "string:x-canonical-private-synchronous:jambi",
-            "-t",
-            "2000",
-            "Jambi",
-            body,
-        ])
-        .status();
+    args.push("-h".into());
+    args.push("string:x-canonical-private-synchronous:jambi".into());
+    args.push("-t".into());
+    args.push("2000".into());
+    args.push("Jambi".into());
+    args.push(body.into());
+
+    let _ = std::process::Command::new("notify-send").args(&args).status();
 }
 
 /// Type the text at the cursor, falling back to the clipboard if no typing tool
@@ -227,13 +267,13 @@ async fn deliver(text: &str, config: &DictateConfig, auto_copy: bool) {
     }
 
     match type_text(text, config).await {
-        Ok(()) => notify("✅ Done"),
+        Ok(()) => notify(config, "✅ Done"),
         Err(e) => {
             warn!("failed to type text: {}", e);
             if copied {
-                notify("📋 Copied to clipboard (typing failed)");
+                notify(config, "📋 Copied to clipboard (typing failed)");
             } else {
-                notify("❌ Could not deliver text");
+                notify(config, "❌ Could not deliver text");
             }
         }
     }

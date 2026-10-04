@@ -75,3 +75,12 @@ type_delay_ms = 10
 # up. Covers a quick tap where the key is released while the model is still
 # loading, so the stop would otherwise find nothing to signal.
 stop_wait_ms = 2000
+
+# Absolute path to the icon shown on notifications. Unset uses the glyph the
+# package ships (white strokes, reads on a dark panel); an entry naming a file
+# that does not exist falls back to no icon rather than a broken image.
+#
+# On a themed desktop, point this at the recoloured copy your theme generates
+# and the notification follows your palette:
+#   icon = "/home/you/.icons/microphone.svg"
+# icon = ""
