@@ -17,10 +17,13 @@ use tracing::{debug, info, warn, error};
 
 mod audio;
 mod config;
+mod daemon;
 mod dictate;
+mod tray;
 mod vosk_engine;
 
 use audio::{AudioRecorder, AudioConfig};
+use tray::{TrayColour, TrayIcon};
 use vosk_engine::{VoskEngine, VoskConfig, VoskModel};
 // Whisper imports removed - using Vosk instead
 
@@ -126,6 +129,25 @@ enum Commands {
         action: DictateAction,
     },
 
+    /// Run the background daemon that keeps the model loaded
+    ///
+    /// Start it once at login and every later command skips the ~800ms model
+    /// load. Nothing requires it: each command falls back to loading its own
+    /// model when no daemon is listening.
+    Daemon {
+        #[command(subcommand)]
+        action: Option<DaemonAction>,
+
+        /// Tray glyph, overriding `daemon.tray_icon` in the config file
+        #[arg(long, value_enum)]
+        icon: Option<TrayIcon>,
+
+        /// Tray ink, overriding `daemon.tray_colour`. `white` suits a dark
+        /// panel, `black` a light one
+        #[arg(long, value_enum)]
+        colour: Option<TrayColour>,
+    },
+
     /// Print the active mode and exit
     ///
     /// Exists so a keybind wrapper script can branch on the configured mode
@@ -138,6 +160,16 @@ enum DictateAction {
     /// Start recording; runs until `stop` signals it
     Start,
     /// Stop the running recording and deliver the text
+    Stop,
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Load the model and serve requests in the foreground (the default)
+    Run,
+    /// Report whether a daemon is running, and what it has loaded
+    Status,
+    /// Ask a running daemon to exit
     Stop,
 }
 
@@ -203,6 +235,52 @@ fn default_stop_wait_ms() -> u64 {
     2000
 }
 
+/// Settings for the background daemon that keeps the model warm.
+///
+/// See `daemon.rs` for what it does. These control how the *front-ends* treat
+/// it as much as the daemon itself, since every command tries the socket and
+/// falls back to loading its own model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    /// Hand work to a running daemon when one is listening. Turning this off
+    /// makes every invocation load its own model again, which is the pre-daemon
+    /// behaviour and a useful thing to compare against.
+    pub enabled: bool,
+
+    /// Show a tray indicator while the daemon runs, so it is visible among
+    /// other background applications. Ignored when built without the `tray`
+    /// feature.
+    pub tray: bool,
+
+    /// Which glyph the indicator draws.
+    pub tray_icon: TrayIcon,
+
+    /// The ink the indicator is drawn in: `white` for a dark panel, `black`
+    /// for a light one. There is no reliable way to read the panel's colour,
+    /// so this is a setting rather than something detected.
+    pub tray_colour: TrayColour,
+
+    /// Hard cap on a single recording, in seconds.
+    ///
+    /// Only reached when the release half of a keybind never arrives -- a
+    /// dropped `bindr`, or a compositor reload mid-press. Without it the
+    /// daemon would hold the microphone open for the rest of the session.
+    pub max_recording_secs: u64,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tray: true,
+            tray_icon: TrayIcon::default(),
+            tray_colour: TrayColour::default(),
+            max_recording_secs: 300,
+        }
+    }
+}
+
 impl Default for DictateConfig {
     fn default() -> Self {
         Self {
@@ -229,6 +307,8 @@ pub struct AppConfig {
     pub mode: Mode,
     #[serde(default)]
     pub dictate: DictateConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
     #[serde(default = "default_auto_copy")]
     pub auto_copy: bool,
     #[serde(default = "default_keep_recordings")]
@@ -250,6 +330,7 @@ impl Default for AppConfig {
             vosk: VoskConfig::default(),
             mode: Mode::default(),
             dictate: DictateConfig::default(),
+            daemon: DaemonConfig::default(),
             auto_copy: true,
             keep_recordings: false,
         }
@@ -295,9 +376,32 @@ async fn main() -> Result<()> {
 
             match action {
                 DictateAction::Start => {
-                    dictate::start(vosk_config, config.dictate, config.auto_copy).await
+                    dictate::start(vosk_config, config.dictate, config.daemon, config.auto_copy)
+                        .await
                 }
-                DictateAction::Stop => dictate::stop(mode, &config.dictate).await,
+                DictateAction::Stop => {
+                    dictate::stop(mode, &config.dictate, &config.daemon, config.auto_copy).await
+                }
+            }
+        }
+        Some(Commands::Daemon { action, icon, colour }) => {
+            let mut vosk_config = vosk_config;
+            vosk_config.verbose = cli.verbose;
+
+            // Flags win over the config file, so both glyphs and both inks can
+            // be tried without editing anything.
+            let mut daemon_config = config.daemon;
+            if let Some(icon) = icon {
+                daemon_config.tray_icon = icon;
+            }
+            if let Some(colour) = colour {
+                daemon_config.tray_colour = colour;
+            }
+
+            match action.unwrap_or(DaemonAction::Run) {
+                DaemonAction::Run => daemon::run(vosk_config, daemon_config).await,
+                DaemonAction::Status => daemon::print_status().await,
+                DaemonAction::Stop => daemon::request_shutdown().await,
             }
         }
         Some(Commands::Record { auto_start, max_duration, output, live }) => {
@@ -311,10 +415,10 @@ async fn main() -> Result<()> {
             let mut vosk_config = vosk_config;
             vosk_config.verbose = cli.verbose;
 
-            run_recording_session(audio_config, vosk_config, auto_start, live, config.auto_copy, cli.verbose).await
+            run_recording_session(audio_config, vosk_config, &config.daemon, auto_start, live, config.auto_copy, cli.verbose).await
         }
         Some(Commands::Transcribe { files, format, output, clipboard }) => {
-            run_transcription(files, vosk_config, format, output, clipboard || config.auto_copy).await
+            run_transcription(files, vosk_config, &config.daemon, format, output, clipboard || config.auto_copy).await
         }
         Some(Commands::Models { detailed }) => {
             list_models(detailed).await
@@ -342,7 +446,8 @@ async fn main() -> Result<()> {
                 Mode::Live => {
                     let mut vosk_config = vosk_config;
                     vosk_config.verbose = cli.verbose;
-                    dictate::start(vosk_config, config.dictate, config.auto_copy).await
+                    dictate::start(vosk_config, config.dictate, config.daemon, config.auto_copy)
+                        .await
                 }
             }
         }
@@ -404,28 +509,218 @@ fn load_config(config_path: Option<&Path>) -> Result<AppConfig> {
 
 
 
+/// Where a front-end does its recognition.
+///
+/// The two variants exist so that nothing above this line has to care whether
+/// a daemon is running. `Daemon` never calls `Model::new` in this process at
+/// all -- that is the load time the daemon exists to remove. `Local` is the
+/// standalone path, and loads on first use rather than at startup so that both
+/// variants behave the same way from the caller's side: construction is cheap,
+/// and the first transcription is where the cost lands.
+enum Engine {
+    Daemon {
+        client: daemon::Client,
+        model: String,
+    },
+    /// Boxed because `VoskEngine` is much the larger variant, and this enum is
+    /// moved around by value.
+    Local(Box<VoskEngine>),
+}
+
+impl Engine {
+    /// Prefer a running daemon, fall back to an in-process engine.
+    async fn connect(vosk_config: VoskConfig, daemon_config: &DaemonConfig) -> Result<Self> {
+        if let Some(mut client) = daemon::Client::connect(daemon_config).await {
+            // Asked rather than assumed: the daemon's model comes from the
+            // config *it* was started with, which may not be this process's.
+            match client.request(&daemon::Request::Status).await {
+                Ok(daemon::Reply::Status { model, .. }) => {
+                    debug!("using the daemon's warm {} model", model);
+                    return Ok(Self::Daemon { client, model });
+                }
+                Ok(other) => warn!("unexpected status from the daemon: {:?}", other),
+                Err(e) => warn!("could not query the daemon ({:#}), loading a model here", e),
+            }
+        }
+
+        Ok(Self::Local(Box::new(VoskEngine::new(vosk_config)?)))
+    }
+
+    /// The model in use, for display.
+    fn model_label(&self) -> String {
+        match self {
+            Self::Daemon { model, .. } => format!("{} (warm, from the daemon)", model),
+            Self::Local(engine) => engine.config.model.to_string(),
+        }
+    }
+
+    /// Load the model now, if this is a local engine that has not yet.
+    ///
+    /// Only worth calling where the caller wants the cost paid at a moment it
+    /// has told the user about, rather than inside the first transcription.
+    async fn warm_up(&mut self) -> Result<()> {
+        if let Self::Local(engine) = self {
+            if engine.model.is_none() {
+                engine.load_model().await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Recognise an audio file, with word timings and confidence intact so
+    /// that `--format json` reports the same thing either way.
+    async fn transcribe_file(&mut self, path: &Path) -> Result<vosk_engine::VoskResult> {
+        match self {
+            Self::Daemon { client, .. } => {
+                // The path travels, not the audio: the daemon runs as the same
+                // user in the same session, so it can open the file itself.
+                //
+                // Resolved here first, because the daemon's working directory
+                // is wherever it was started from -- a bare `jambi transcribe
+                // clip.wav` would otherwise ask it to open a `clip.wav` that
+                // means something else entirely, or nothing at all.
+                let absolute = std::fs::canonicalize(path)
+                    .with_context(|| format!("cannot read {}", path.display()))?;
+                let request = daemon::Request::TranscribeFile { path: absolute };
+                match client.request(&request).await? {
+                    daemon::Reply::Transcribed { result } => Ok(result),
+                    daemon::Reply::Error { message } => Err(anyhow::anyhow!(message)),
+                    other => Err(anyhow::anyhow!("unexpected reply: {:?}", other)),
+                }
+            }
+            Self::Local(engine) => {
+                if engine.model.is_none() {
+                    engine.load_model().await?;
+                }
+                engine.transcribe_file(path).await
+            }
+        }
+    }
+
+    /// Transcribe from the microphone, printing text as it is recognised and
+    /// stopping when the user presses Enter.
+    async fn transcribe_live(&mut self) -> Result<String> {
+        match self {
+            Self::Daemon { client, .. } => stream_from_daemon(client).await,
+            Self::Local(engine) => Ok(engine.transcribe_live().await?.text),
+        }
+    }
+
+    /// Switch to a different language model.
+    async fn set_model(&mut self, model: VoskModel) -> Result<()> {
+        match self {
+            Self::Daemon {
+                client,
+                model: current,
+            } => {
+                // Swaps the daemon's warm model, so the change outlives this
+                // process. That is what someone switching language wants, and
+                // worth knowing before they wonder why it stuck.
+                match client.request(&daemon::Request::SetModel { model }).await? {
+                    daemon::Reply::Ok => {
+                        *current = model.to_string();
+                        Ok(())
+                    }
+                    daemon::Reply::Error { message } => Err(anyhow::anyhow!(message)),
+                    other => Err(anyhow::anyhow!("unexpected reply: {:?}", other)),
+                }
+            }
+            Self::Local(engine) => {
+                let mut config = engine.config.clone();
+                config.model = model;
+                engine.config = config;
+                engine.model = None; // force a reload against the new model
+                engine.load_model().await
+            }
+        }
+    }
+}
+
+/// Drive a `Stream` request on the daemon: print partial results as they
+/// arrive, and stop when the user presses Enter.
+///
+/// The terminal handling mirrors `VoskEngine::transcribe_live` so the two
+/// paths look identical to someone watching, with the only difference being
+/// which process owns the model.
+async fn stream_from_daemon(client: &mut daemon::Client) -> Result<String> {
+    match client.request(&daemon::Request::Stream).await? {
+        daemon::Reply::Streaming => {}
+        daemon::Reply::AlreadyRecording => {
+            anyhow::bail!("the daemon is already recording for something else")
+        }
+        daemon::Reply::Error { message } => anyhow::bail!(message),
+        other => anyhow::bail!("unexpected reply: {:?}", other),
+    }
+
+    println!("⚠️ Press Enter to stop");
+
+    // A thread, not a tokio task: a blocking stdin read cannot be cancelled,
+    // and this one lives until the process exits either way.
+    let (enter_tx, enter_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = io::stdin().read_line(&mut line);
+        let _ = enter_tx.send(());
+    });
+
+    let mut enter = enter_rx;
+    let mut asked_to_stop = false;
+
+    let text = loop {
+        tokio::select! {
+            _ = &mut enter, if !asked_to_stop => {
+                asked_to_stop = true;
+                client.send(&daemon::Request::Stop).await?;
+            }
+            reply = client.next_reply() => match reply? {
+                daemon::Reply::Partial { text } => {
+                    print!("\r\x1b[K📝 {}", text);
+                    io::stdout().flush().ok();
+                }
+                daemon::Reply::Segment { text } => {
+                    print!("\r\x1b[K✅ {}\n", text);
+                    io::stdout().flush().ok();
+                }
+                daemon::Reply::Final { text } => break text,
+                daemon::Reply::Error { message } => anyhow::bail!(message),
+                other => anyhow::bail!("unexpected reply: {:?}", other),
+            }
+        }
+    };
+
+    println!("⏹️ Stopped live transcription");
+
+    Ok(text)
+}
+
 /// Run interactive recording mode
 async fn run_interactive_mode(config: AppConfig, auto_copy: bool, verbose: bool) -> Result<()> {
     println!("🎙️  Jambi - Interactive Voice Transcription");
     println!("============================================");
-    println!("Model: {}", config.vosk.model);
-    println!("Sample Rate: {}Hz, Channels: {}", 
-             config.audio.sample_rate, config.audio.channels);
-    println!("Output Directory: {}", config.audio.output_dir.display());
-    println!();
 
     let mut audio_config = config.audio.clone();
     audio_config.verbose = verbose;
     let mut recorder = AudioRecorder::new(audio_config)?;
-    
+
     let mut vosk_config = config.vosk;
     vosk_config.verbose = verbose;
-    let mut vosk_engine = VoskEngine::new(vosk_config)?;
-    
-    // Load the whisper model
-    println!("🔄 Loading Vosk model...");
-    if let Err(e) = vosk_engine.load_model().await {
-        println!("⚠️  Model loading failed: {}. Will download on first use.", e);
+    let mut engine = Engine::connect(vosk_config, &config.daemon).await?;
+
+    println!("Model: {}", engine.model_label());
+    println!("Sample Rate: {}Hz, Channels: {}",
+             config.audio.sample_rate, config.audio.channels);
+    println!("Output Directory: {}", config.audio.output_dir.display());
+    println!();
+
+    // Loading up front rather than on first use, because this menu is a place
+    // the user waits anyway -- better here, with a line saying so, than as an
+    // unexplained pause after they press R. With a daemon this is a no-op and
+    // the message never appears.
+    if matches!(engine, Engine::Local(_)) {
+        println!("🔄 Loading Vosk model...");
+        if let Err(e) = engine.warm_up().await {
+            println!("⚠️  Model loading failed: {}. Will download on first use.", e);
+        }
     }
 
     // Test audio setup
@@ -458,19 +753,19 @@ async fn run_interactive_mode(config: AppConfig, auto_copy: bool, verbose: bool)
 
         match input.trim().to_uppercase().as_str() {
             "R" | "RECORD" => {
-                if let Err(e) = record_and_transcribe(&mut recorder, &mut vosk_engine, auto_copy).await {
+                if let Err(e) = record_and_transcribe(&mut recorder, &mut engine, auto_copy).await {
                     error!("Recording failed: {}", e);
                     println!("❌ Recording failed: {}", e);
                 }
             }
             "T" | "TRANSCRIBE" => {
-                if let Err(e) = transcribe_file_interactive(&mut vosk_engine, auto_copy).await {
+                if let Err(e) = transcribe_file_interactive(&mut engine, auto_copy).await {
                     error!("Transcription failed: {}", e);
                     println!("❌ Transcription failed: {}", e);
                 }
             }
             "M" | "MODEL" => {
-                if let Err(e) = switch_model_interactive(&mut vosk_engine).await {
+                if let Err(e) = switch_model_interactive(&mut engine).await {
                     error!("Model switch failed: {}", e);
                     println!("❌ Model switch failed: {}", e);
                 }
@@ -492,7 +787,7 @@ async fn run_interactive_mode(config: AppConfig, auto_copy: bool, verbose: bool)
 /// Record audio and transcribe it
 async fn record_and_transcribe(
     recorder: &mut AudioRecorder,
-    vosk_engine: &mut VoskEngine,
+    engine: &mut Engine,
     auto_copy: bool,
 ) -> Result<()> {
     let recording_info = recorder.record_audio().await?;
@@ -503,23 +798,23 @@ async fn record_and_transcribe(
     println!("   Size: {}", audio::format_file_size(recording_info.file_size));
 
     println!("🧠 Transcribing audio...");
-    let result = vosk_engine.transcribe_file(&recording_info.file_path).await?;
+    let text = engine.transcribe_file(&recording_info.file_path).await?.text;
 
     println!("📝 Transcription completed successfully");
     println!();
     println!("┌{}┐", "─".repeat(60));
     println!("│ {:^58} │", "TRANSCRIPTION RESULT");
     println!("├{}┤", "─".repeat(60));
-    for line in result.text.lines() {
+    for line in text.lines() {
         println!("│ {:<58} │", truncate_string(line, 58));
     }
     println!("└{}┘", "─".repeat(60));
     println!();
 
-    if auto_copy && !result.text.is_empty() {
+    if auto_copy && !text.is_empty() {
         match tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            copy_to_clipboard(&result.text)
+            copy_to_clipboard(&text)
         ).await {
             Ok(Ok(_)) => println!("\n📋 Copied to clipboard"),
             Ok(Err(e)) => {
@@ -542,7 +837,7 @@ async fn record_and_transcribe(
 }
 
 /// Transcribe an existing file interactively
-async fn transcribe_file_interactive(vosk_engine: &mut VoskEngine, auto_copy: bool) -> Result<()> {
+async fn transcribe_file_interactive(engine: &mut Engine, auto_copy: bool) -> Result<()> {
     print!("Enter path to audio file: ");
     io::stdout().flush()?;
 
@@ -562,17 +857,17 @@ async fn transcribe_file_interactive(vosk_engine: &mut VoskEngine, auto_copy: bo
     }
 
     println!("🧠 Transcribing: {}", path.display());
-    let result = vosk_engine.transcribe_file(&path).await?;
+    let text = engine.transcribe_file(&path).await?.text;
 
     println!("📝 Transcription completed successfully");
     println!();
-    println!("{}", result.text);
+    println!("{}", text);
     println!();
 
-    if auto_copy && !result.text.is_empty() {
+    if auto_copy && !text.is_empty() {
         match tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            copy_to_clipboard(&result.text)
+            copy_to_clipboard(&text)
         ).await {
             Ok(Ok(_)) => println!("\n📋 Copied to clipboard"),
             Ok(Err(e)) => {
@@ -590,7 +885,7 @@ async fn transcribe_file_interactive(vosk_engine: &mut VoskEngine, auto_copy: bo
 }
 
 /// Switch model interactively
-async fn switch_model_interactive(vosk_engine: &mut VoskEngine) -> Result<()> {
+async fn switch_model_interactive(engine: &mut Engine) -> Result<()> {
     println!("Available models:");
     let models = VoskEngine::available_models();
     for (i, model) in models.iter().enumerate() {
@@ -607,16 +902,17 @@ async fn switch_model_interactive(vosk_engine: &mut VoskEngine) -> Result<()> {
     if let Ok(choice) = input.trim().parse::<usize>() {
         if choice > 0 && choice <= models.len() {
             let selected_model = models[choice - 1];
-            let mut config = vosk_engine.config.clone();
-            config.model = selected_model;
-            vosk_engine.config = config;
-            vosk_engine.model = None; // Reset model to force reload
-            
-            // Reload the model
+
             println!("Loading new model: {}", selected_model);
-            vosk_engine.load_model().await?;
-            
+            engine.set_model(selected_model).await?;
+
             println!("✅ Switched to model: {}", selected_model);
+            if matches!(engine, Engine::Daemon { .. }) {
+                // Said plainly because it is the surprising part: the daemon
+                // holds one warm model, so this outlives the menu and applies
+                // to dictation too.
+                println!("   (the daemon's warm model changed, so this applies everywhere)");
+            }
             return Ok(());
         }
     }
@@ -629,16 +925,18 @@ async fn switch_model_interactive(vosk_engine: &mut VoskEngine) -> Result<()> {
 async fn run_recording_session(
     audio_config: AudioConfig,
     vosk_config: VoskConfig,
+    daemon_config: &DaemonConfig,
     auto_start: bool,
     live: bool,
     auto_copy: bool,
     verbose: bool,
 ) -> Result<()> {
     let mut recorder = AudioRecorder::new(audio_config)?;
-    let mut vosk_engine = VoskEngine::new(vosk_config)?;
-    
-    // Load the vosk model
-    if let Err(e) = vosk_engine.load_model().await {
+    let mut engine = Engine::connect(vosk_config, daemon_config).await?;
+
+    // Loaded here rather than during the first recording, where it would eat
+    // the beginning of what the user says. A daemon has already done it.
+    if let Err(e) = engine.warm_up().await {
         if verbose {
             eprintln!("⚠️  Model loading failed: {}. Will download on first use.", e);
         }
@@ -652,18 +950,17 @@ async fn run_recording_session(
             io::stdin().read_line(&mut input)?;
         }
 
-        // Check if live transcription is enabled
         // Perform recording/transcription based on mode
-        let result = if live {
+        let text = if live {
             // Use live transcription mode
             println!("🎤 Live transcription enabled & now listening...");
-            
-            let live_result = vosk_engine.transcribe_live().await?;
-            
+
+            let live_text = engine.transcribe_live().await?;
+
             println!("\n📝 Final Transcription:");
-            println!("{}", live_result.text);
-            
-            live_result
+            println!("{}", live_text);
+
+            live_text
         } else {
             // Use the new record_audio function that handles Enter-to-stop
             let recording_info = recorder.record_audio().await?;
@@ -671,18 +968,18 @@ async fn run_recording_session(
             println!("⏱️ Recording completed: {}", audio::format_duration(recording_info.duration));
             println!("🧠 Transcribing...");
 
-            let transcription_result = vosk_engine.transcribe_file(&recording_info.file_path).await?;
-            
+            let transcribed = engine.transcribe_file(&recording_info.file_path).await?.text;
+
             println!("📝 Transcription Result:");
-            println!("{}", transcription_result.text);
-            
-            transcription_result
+            println!("{}", transcribed);
+
+            transcribed
         };
 
-        if auto_copy && !result.text.is_empty() {
+        if auto_copy && !text.is_empty() {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                copy_to_clipboard(&result.text)
+                copy_to_clipboard(&text)
             ).await {
                 Ok(Ok(_)) => println!("\n📋 Copied to clipboard"),
                 Ok(Err(e)) => {
@@ -717,6 +1014,7 @@ async fn run_recording_session(
 async fn run_transcription(
     files: Vec<PathBuf>,
     config: VoskConfig,
+    daemon_config: &DaemonConfig,
     format: String,
     output: Option<PathBuf>,
     clipboard: bool,
@@ -725,19 +1023,18 @@ async fn run_transcription(
         return Err(anyhow::anyhow!("No input files specified"));
     }
 
-    let mut vosk_engine = VoskEngine::new(config)?;
-    
-    // Load the vosk model
-    if let Err(e) = vosk_engine.load_model().await {
+    let mut engine = Engine::connect(config, daemon_config).await?;
+
+    if let Err(e) = engine.warm_up().await {
         eprintln!("⚠️  Model loading failed: {}. Will download on first use.", e);
     }
-    
+
     let mut results = Vec::new();
 
     for file in &files {
         println!("🧠 Transcribing: {}", file.display());
-        
-        match vosk_engine.transcribe_file(file).await {
+
+        match engine.transcribe_file(file).await {
             Ok(result) => {
                 println!("✅ Transcription completed");
                 results.push((file.clone(), result));

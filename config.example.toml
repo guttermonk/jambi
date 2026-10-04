@@ -84,3 +84,47 @@ stop_wait_ms = 2000
 # and the notification follows your palette:
 #   icon = "/home/you/.icons/microphone.svg"
 # icon = ""
+
+# Settings for the background daemon (`jambi daemon`), which loads the Vosk
+# model once and keeps it in memory so later commands skip the ~800ms load.
+# Start one at login and nothing else changes: every command tries the daemon's
+# socket and falls back to loading its own model when none is listening.
+[daemon]
+# Hand work to a running daemon when there is one. Setting this to false makes
+# every invocation load its own model again -- the behaviour from before the
+# daemon existed, and a useful thing to compare timings against. The
+# JAMBI_NO_DAEMON environment variable does the same for a single run.
+enabled = true
+
+# Show a tray indicator while the daemon runs, so it is visible alongside other
+# background applications. The icon turns red while a recording is in progress.
+# No effect on a desktop with no system tray, where the daemon simply runs
+# without one.
+tray = true
+
+# Which glyph the indicator draws:
+#
+#   "microphone" - the same shape the notifications use (the default)
+#   "lamp"       - a genie lamp, Jambi being a genie
+#
+# Try either without editing this file: `jambi daemon --icon lamp`.
+tray_icon = "microphone"
+
+# The ink the indicator is drawn in. Nothing can reliably read your panel's
+# colour, so this is a setting rather than something detected:
+#
+#   "white" - near-white, for a dark panel (the default)
+#   "black" - near-black, for a light panel
+#
+# "dark" and "light" are accepted as aliases naming the panel instead of the
+# ink, so `tray_colour = "dark"` means the same as "white". Recording stays red
+# either way -- that reports state, not theme.
+#
+# Try either with `jambi daemon --colour black`.
+tray_colour = "white"
+
+# Hard cap on a single recording, in seconds. Only reached when the release
+# half of the keybind never arrives -- a dropped `bindr`, or a compositor
+# reload mid-press. Without it the daemon would hold the microphone open for
+# the rest of the session.
+max_recording_secs = 300

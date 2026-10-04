@@ -1,0 +1,43 @@
+# A systemd *user* unit -- install under ~/.config/systemd/user/, never
+# system-wide. The daemon records from the session's microphone and keeps its
+# socket in $XDG_RUNTIME_DIR, both of which belong to one logged-in user.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp packaging/systemd/jambi-daemon.service ~/.config/systemd/user/
+#   $EDITOR ~/.config/systemd/user/jambi-daemon.service   # set ExecStart
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now jambi-daemon
+#
+# The Nix package ships a copy with ExecStart already pointing into the store,
+# at $out/share/systemd/user/jambi-daemon.service.
+
+[Unit]
+Description=Jambi voice transcription daemon
+Documentation=https://github.com/guttermonk/jambi
+
+# Bound to the graphical session rather than to login. Recognition itself needs
+# nothing graphical, but the tray indicator needs a session bus and a tray
+# host, and both arrive with the session.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+
+# Adjust to wherever jambi is installed: systemd needs an absolute path and
+# will not search PATH. `command -v jambi` will tell you.
+ExecStart=/usr/local/bin/jambi daemon
+
+# Worth recovering from a crash, since the whole point is to be there when a
+# keybind is pressed. The delay stops a daemon that cannot load its model at
+# all from spinning.
+Restart=on-failure
+RestartSec=2
+
+# SIGTERM is handled: the daemon ends any recording in progress, removes its
+# socket and exits, so `systemctl --user stop` leaves nothing behind.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=graphical-session.target

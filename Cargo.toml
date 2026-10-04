@@ -53,6 +53,11 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"], optional = true }
 nix = { version = "0.30.1", features = ["signal"] }
 
+# System tray indicator for the daemon. StatusNotifierItem over D-Bus, the
+# protocol Vorta/KeePassXC/OpenSnitch use, via zbus -- so no libdbus to link
+# and nothing extra for the Nix build to find on the host.
+ksni = { version = "0.3.6", default-features = false, features = ["tokio"], optional = true }
+
 [dev-dependencies]
 # For tests
 tempfile = "3.8"
@@ -75,6 +80,10 @@ opt-level = 0
 
 # Feature flags
 [features]
-default = ["cli"]
+default = ["cli", "tray"]
 cli = ["dep:clap"]
+# Tray indicator for `jambi daemon`. On by default because a daemon you cannot
+# see is a daemon you cannot tell is running; turn it off for a headless build,
+# or leave it on and set `tray = false` under [daemon] to decide at runtime.
+tray = ["dep:ksni"]
 # openai = ["dep:reqwest"]  # Enable when needed

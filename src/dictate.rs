@@ -13,19 +13,26 @@
 //!   release -> `jambi dictate stop`, which signals it and exits immediately
 //!
 //! They find each other through a pidfile under $XDG_RUNTIME_DIR.
+//!
+//! When a daemon is running (see `daemon.rs`) the recording happens there
+//! instead, on a model that is already in memory, and `stop` receives the text
+//! over the socket rather than signalling a process. Delivery stays here either
+//! way: typing needs the compositor's environment, which this process has and
+//! a daemon started from a systemd unit may not.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
+use crate::daemon::{Client, Reply, Request};
 use crate::vosk_engine::{VoskConfig, VoskEngine};
-use crate::{DictateConfig, Mode};
+use crate::{DaemonConfig, DictateConfig, Mode};
 
 /// Runtime state lives under $XDG_RUNTIME_DIR so it is cleared on logout and is
 /// never world-readable; a stale pidfile in /tmp would otherwise outlive the
 /// session and make `stop` signal an unrelated process.
-fn state_dir() -> PathBuf {
+pub fn state_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -76,12 +83,50 @@ fn running_pid() -> Option<i32> {
 /// Begin recording and block until signalled, then deliver the text.
 ///
 /// Runs in the foreground; the compositor's `exec` is what detaches it.
+///
+/// Hands the recording to a running daemon when there is one, which is the
+/// fast path: the model is already in memory, so recognition begins as soon as
+/// the microphone opens instead of racing a disk read against the first word.
+/// This process then exits immediately and `stop` collects the text.
 pub async fn start(
     vosk_config: VoskConfig,
     dictate_config: DictateConfig,
+    daemon_config: DaemonConfig,
     auto_copy: bool,
 ) -> Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
+
+    if let Some(mut client) = Client::connect(&daemon_config).await {
+        match client.request(&Request::Start).await {
+            Ok(Reply::Started) => {
+                debug!("daemon is recording");
+                notify(&dictate_config, "🎤 Listening...");
+                return Ok(());
+            }
+            Ok(Reply::AlreadyRecording) => {
+                warn!("the daemon is already recording");
+                notify(&dictate_config, "⚠️ Already recording");
+                return Ok(());
+            }
+            Ok(Reply::Error { message }) => {
+                error!("daemon refused to start recording: {}", message);
+                notify(&dictate_config, "❌ Recording failed - check the microphone");
+                return Err(anyhow::anyhow!(message));
+            }
+            Ok(other) => {
+                // Falling through to the in-process path would be worse than
+                // failing loudly: a daemon answering nonsense is a bug, and
+                // recording twice over it would hide that.
+                anyhow::bail!("unexpected reply from the daemon: {:?}", other);
+            }
+            Err(e) => {
+                // The daemon was reachable a moment ago and is not now -- it
+                // was shut down mid-request, most likely. Recording in-process
+                // is exactly the right answer.
+                warn!("daemon request failed ({:#}), recording in-process", e);
+            }
+        }
+    }
 
     if let Some(existing) = running_pid() {
         // Not an error: holding the key sends one press, but key repeat or a
@@ -154,32 +199,73 @@ pub async fn start(
     Ok(())
 }
 
-/// Signal the running recorder to finish. Returns as soon as the signal is
-/// delivered -- the recorder does the typing.
+/// End the running recording and deliver its text.
+///
+/// Two shapes of recorder may be out there, and both are checked each time
+/// round the poll loop rather than being chosen up front: a daemon can be
+/// started or stopped between a press and its release, and committing to one
+/// answer at the top would make that window silently drop a dictation.
+///
+///   in-process -- signal the pidfile's process; it does its own delivery
+///   daemon     -- collect the text over the socket and deliver it here
+///
+/// Delivery stays in this process for the daemon case because typing needs the
+/// compositor's environment (WAYLAND_DISPLAY, and `wtype` on PATH). This half
+/// is spawned by the keybind so it always has that; a daemon under a systemd
+/// unit may not.
 ///
 /// `mode` is taken so that one keybind can serve both modes: the release half
 /// fires regardless of which mode the press acted on, and in windowed mode
 /// there is never a recording to stop. Without this check every press in
 /// windowed mode would poll for `stop_wait_ms` and then pop up a "no recording"
 /// notification about a recording the user never started.
-pub async fn stop(mode: Mode, dictate_config: &DictateConfig) -> Result<()> {
-    use nix::sys::signal::{kill, Signal};
-    use nix::unistd::Pid;
-
+pub async fn stop(
+    mode: Mode,
+    dictate_config: &DictateConfig,
+    daemon_config: &DaemonConfig,
+    auto_copy: bool,
+) -> Result<()> {
     if mode != Mode::Live {
         debug!("mode is {}, nothing to stop", mode);
         return Ok(());
     }
 
-    // The press half has to create the pidfile before this can find it, and on
-    // a quick tap the release arrives first. Poll briefly rather than reporting
+    // The press half has to register itself before this can find it, and on a
+    // quick tap the release arrives first. Poll briefly rather than reporting
     // "nothing recording" for what is really a race the user cannot see.
     let deadline = Duration::from_millis(dictate_config.stop_wait_ms);
     let started = std::time::Instant::now();
-    let pid = loop {
+
+    // One connection, reused across the polls: a `stop` that finds nothing is
+    // retried, and reconnecting every 25ms to ask again would be wasteful.
+    let mut client = Client::connect(daemon_config).await;
+
+    loop {
         if let Some(pid) = running_pid() {
-            break pid;
+            return signal_recorder(pid);
         }
+
+        // Taken rather than borrowed so that a failed request simply drops the
+        // connection: the remaining polls then watch the pidfile alone.
+        if let Some(mut connected) = client.take() {
+            match collect_from_daemon(&mut connected).await {
+                Ok(Collected::Text(text)) => {
+                    return finish(text, dictate_config, auto_copy).await;
+                }
+                Ok(Collected::Elsewhere) => return Ok(()),
+                Ok(Collected::Failed(message)) => {
+                    error!("dictation failed: {}", message);
+                    notify(dictate_config, "❌ Recording failed - check the microphone");
+                    return Err(anyhow::anyhow!(message));
+                }
+                Ok(Collected::Pending) => client = Some(connected),
+                Err(e) => warn!(
+                    "daemon request failed ({:#}), watching the pidfile instead",
+                    e
+                ),
+            }
+        }
+
         if started.elapsed() >= deadline {
             // Reached either because no recording was running, or because the
             // one that was died on its own -- a microphone that cannot be
@@ -187,17 +273,68 @@ pub async fn stop(mode: Mode, dictate_config: &DictateConfig) -> Result<()> {
             // as a denial of something the user had just plainly started, so
             // this states the outcome instead of arguing about the premise;
             // the recorder itself notifies the specific failure.
-            warn!("no dictation process found after {:?}", deadline);
+            warn!("no dictation in progress after {:?}", deadline);
             notify(dictate_config, "⏹️ Recording already stopped");
             return Ok(());
         }
+
         tokio::time::sleep(Duration::from_millis(25)).await;
-    };
+    }
+}
+
+/// Signal an in-process recorder to finish. Returns as soon as the signal is
+/// delivered -- that process does its own typing.
+fn signal_recorder(pid: i32) -> Result<()> {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
 
     kill(Pid::from_raw(pid), Signal::SIGUSR1)
         .with_context(|| format!("failed to signal dictation process {}", pid))?;
 
     debug!("signalled pid {} to stop", pid);
+    Ok(())
+}
+
+/// What the daemon had to say about the recording.
+enum Collected {
+    /// Nothing is recording *yet* -- the race the poll loop exists to absorb.
+    Pending,
+    /// The recording ended. Empty means it heard no speech.
+    Text(String),
+    /// A streaming front-end owns the recording and shows the text itself, so
+    /// there is nothing here to deliver. Distinct from an empty transcript,
+    /// which would otherwise be reported as "no speech detected".
+    Elsewhere,
+    /// The recording itself failed -- an unavailable microphone, usually.
+    /// Reported separately from a transport error because there is no point
+    /// retrying it, and the user needs to be told why nothing was typed.
+    Failed(String),
+}
+
+/// Ask the daemon to end the recording and hand over its text.
+async fn collect_from_daemon(client: &mut Client) -> Result<Collected> {
+    match client.request(&Request::Stop).await? {
+        Reply::Stopped { text: Some(text) } => Ok(Collected::Text(text)),
+        Reply::Stopped { text: None } => {
+            debug!("the recording belongs to a streaming client");
+            Ok(Collected::Elsewhere)
+        }
+        Reply::NotRecording => Ok(Collected::Pending),
+        Reply::Error { message } => Ok(Collected::Failed(message)),
+        other => Err(anyhow::anyhow!("unexpected reply: {:?}", other)),
+    }
+}
+
+/// Report and deliver a transcript collected from the daemon.
+async fn finish(text: String, config: &DictateConfig, auto_copy: bool) -> Result<()> {
+    if text.is_empty() {
+        info!("no speech recognised");
+        notify(config, "❌ No speech detected");
+        return Ok(());
+    }
+
+    info!("dictated: {}", text);
+    deliver(&text, config, auto_copy).await;
     Ok(())
 }
 

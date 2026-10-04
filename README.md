@@ -27,6 +27,7 @@ If you like the project, please show your support by leaving a star. Thanks!
 - **Low latency** - Instant results without GPU requirements
 - **Multiple languages** - Supports 12+ languages including English, Spanish, French, German, Chinese, etc.
 - **Privacy-focused** - Everything runs locally after initial setup, no cloud services required
+- **Optional daemon** - Keeps the model warm in the background so commands start instantly, with a tray indicator to show it is there
 
 ## Quick Start
 
@@ -140,6 +141,123 @@ clipboard as well when `auto_copy` is on, so nothing is lost if typing fails.
 Because Vosk recognises speech *as you speak*, releasing the key is near
 instant -- there is no post-hoc pass over the clip to wait through.
 
+#### Background Daemon (optional, for faster startup)
+
+Loading the Vosk model takes most of a second, and a one-shot process pays it
+every single time. Run the daemon once and that cost is paid once, at login:
+
+```bash
+jambi daemon          # loads the model, then serves requests
+jambi daemon status   # is one running, and what has it loaded?
+jambi daemon stop     # ask it to exit
+```
+
+##### Start-up and run times
+
+| | without daemon | with daemon | saved |
+|---|---|---|---|
+| **Start up** -- `jambi daemon`, paid once at login | n/a | 645 ms | -- |
+| **Run** -- `jambi transcribe`, 1s clip | 1352 ms | 616 ms | 736 ms |
+| **Run** -- `jambi transcribe`, 10s clip | 1405 ms | 747 ms | 658 ms |
+| Reference -- `jambi mode`, loads no model | ~25 ms | ~25 ms | -- |
+
+The saving is near-constant rather than proportional to the audio, and it
+matches the start-up row almost exactly: what the daemon removes is the model
+load, not any part of the recognition. The last row is the yardstick -- a
+command that touches no model runs in about 25ms either way, so essentially the
+whole difference is the model, paid once instead of every time.
+
+<sub>Release build, `vosk-model-small-en-us-0.15`, median of 15 runs on an idle
+machine with a warm page cache; the start-up figure is the median of 4 cold
+starts (577--724 ms). Measured with `WAYLAND_DISPLAY`/`DISPLAY` unset so
+`auto_copy` fails immediately rather than spawning `wl-copy`, whose 2s timeout
+otherwise swamps everything here. This is a faster machine than the one used
+for the cross-tool comparison under [Performance](#performance), so compare the
+two columns here, not the two tables -- and expect your own absolute numbers to
+differ. The gap is the part that travels.</sub>
+
+Nothing requires it. Every command tries the daemon's socket
+(`$XDG_RUNTIME_DIR/jambi/daemon.sock`) and falls back to loading its own model
+when none is listening, so starting or stopping the daemon changes speed and
+nothing else. `JAMBI_NO_DAEMON=1` bypasses it for a single run, and
+`enabled = false` under `[daemon]` turns it off for good.
+
+For hold-to-talk dictation the difference is more than the clock: without a
+daemon the model is being read off disk while you are already talking, and with
+one, recognition starts the moment the microphone opens.
+
+**Tray indicator.** While the daemon runs it publishes a StatusNotifierItem --
+the same mechanism Vorta, KeePassXC and OpenSnitch use -- so it appears in your
+tray with the other background applications. It turns red while a recording is
+in progress, which is how a dictation whose key release went missing becomes
+visible instead of silently holding the microphone. Its menu shows the warm
+model and offers **Quit Jambi daemon**. Set `tray = false` under `[daemon]` to
+run without one; on a desktop with no tray at all the daemon just carries on
+and logs that it has no indicator.
+
+Two glyphs and two inks, chosen under `[daemon]`:
+
+```toml
+[daemon]
+tray_icon = "microphone"   # or "lamp" -- a genie lamp
+tray_colour = "white"      # or "black"
+```
+
+`tray_icon` picks between the microphone, matching the notification glyph, and
+a genie lamp -- Jambi being a genie. The lamp is drawn solid and unadorned, so
+every pixel goes to the shape itself; being wider than it is tall, it fills the
+width of the icon slot and rather less of the height. `tray_colour` is the ink:
+`white` for a dark panel, `black` for a light one. Nothing can reliably read
+your panel's colour, so it is a setting rather than something detected;
+`"dark"` and `"light"` are accepted as aliases naming the panel instead of the
+ink, so `tray_colour = "dark"` means the same as `"white"`. Recording stays red
+in both, since that reports state rather than following the theme.
+
+Both have a flag, so you can see them before committing to a config edit:
+
+```bash
+jambi daemon --icon lamp --colour black
+```
+
+The glyphs are drawn in code rather than shipped as bitmaps, so they stay crisp
+at whatever size your panel asks for instead of being scaled from one image.
+
+**Starting it at login.** For Hyprland, the simplest route is your config:
+
+```
+exec-once = jambi daemon
+```
+
+Or as a systemd user service, which also restarts it if it ever dies:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp packaging/systemd/jambi-daemon.service ~/.config/systemd/user/
+# set ExecStart to the output of `command -v jambi`
+systemctl --user daemon-reload
+systemctl --user enable --now jambi-daemon
+```
+
+On Nix the unit ships ready to use, with its path already filled in:
+
+```bash
+mkdir -p ~/.config/systemd/user
+ln -sf "$(nix build --no-link --print-out-paths github:guttermonk/jambi)/share/systemd/user/jambi-daemon.service" \
+  ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now jambi-daemon
+```
+
+The daemon never types the transcription itself. `jambi dictate stop` does
+that, because typing needs the compositor's environment (`WAYLAND_DISPLAY`,
+`wtype` on PATH) which the keybind has and a systemd unit may not -- so the
+daemon hands over the text and delivery takes exactly the same path it does
+without a daemon.
+
+It also does not hold the microphone open between recordings. That would shave
+a few more milliseconds off, at the cost of showing jambi as permanently
+recording in PipeWire and holding the device against everything else.
+
 #### Transcribe File
 Transcribe an existing audio file:
 ```bash
@@ -190,6 +308,7 @@ Edit it to change:
 - Sample rate
 - Auto-copy to clipboard
 - Output directory
+- Whether to use the background daemon, and its tray indicator's glyph and colour
 
 Every key is optional -- a file setting nothing but `mode` is valid, and the
 rest falls back to defaults.
@@ -217,6 +336,13 @@ output_dir = "~/jambi_recordings"
 modifier_grace_ms = 250  # wait for hotkey modifiers to lift before typing
 type_delay_ms = 10       # per-keystroke delay for wtype/xdotool
 # icon = "/home/you/.icons/microphone.svg"  # see Notifications below
+
+[daemon]                   # see Background Daemon above
+enabled = true             # use a running daemon when one is listening
+tray = true                # show a tray indicator while it runs
+tray_icon = "microphone"   # or "lamp"
+tray_colour = "white"      # or "black" for a light panel
+max_recording_secs = 300   # safety cap if a key release is ever missed
 ```
 
 ### Notifications
@@ -255,6 +381,8 @@ jambi/
 ├── src/                 # Rust source code
 │   ├── main.rs         # CLI entry point
 │   ├── lib.rs          # Library interface
+│   ├── daemon.rs       # Background daemon that keeps the model warm
+│   ├── tray.rs         # Tray indicator for the daemon
 │   ├── vosk_engine.rs  # Vosk speech recognition
 │   ├── audio.rs        # Audio recording
 │   └── config.rs       # Configuration handling
@@ -267,14 +395,46 @@ jambi/
 
 ## Performance
 
-Vosk provides real-time transcription on CPU:
-- **Speed**: 0.1-0.5x real-time factor (faster than audio playback)
-- **Memory**: ~300MB RAM usage
-- **Model size**: 40MB (small model)
+Measured against two Whisper-based dictation tools on the same 11.0s clip
+(`jfk.wav` from whisper.cpp's test suite), same machine, median of 3 runs.
+The machine is the kind Jambi targets: an Intel i5-4250U, 2 cores at 1.3GHz,
+integrated graphics, no discrete GPU.
 
-Compare with Whisper on CPU:
-- Whisper: 30-60+ seconds for 3 seconds of audio
-- Vosk: 0.3-1.5 seconds for 3 seconds of audio
+| Tool | Engine | Model | Time | vs realtime | Peak RAM |
+|---|---|---|---|---|---|
+| **Jambi** | Vosk (Kaldi) | small-en-us, 68MB | **3.4s** | **0.31x** | **175MB** |
+| whisp-away | faster-whisper (CTranslate2) | base.en, 141MB | 6.7s | 0.61x | 430MB |
+| voxtype | whisper.cpp (ggml) | tiny.en, 75MB | 22.5s | 2.05x | 220MB |
+| voxtype | whisper.cpp (ggml) | base.en, 142MB | 53.1s | 4.83x | 332MB |
+
+All four transcribed all 21 words correctly. Jambi was the fastest and the
+lightest: 2x faster than the next tool and 6.6x faster than whisper.cpp at a
+comparable model size, in a third of whisp-away's memory. Jambi and
+whisp-away both finished before the clip would have finished playing;
+whisper.cpp did not, at either size. The headroom is what makes hold-to-talk
+feel immediate rather than merely quick.
+
+Two honest caveats. **Vosk returns no capitalisation or punctuation** --
+Jambi gave `and so my fellow americans ask not what your country...` where
+both Whisper tools produced fully punctuated text. If you need prose rather
+than words, that is a real cost, and the right reason to pick a Whisper tool
+over this one. And the clip is clean studio speech, which flatters every
+engine relative to a laptop microphone in a noisy room; treat the ratios as
+sound and the absolute numbers as a best case.
+
+Worth noting what the middle two rows isolate: same `base.en` weights, two
+runtimes, 6.7s against 53.1s. Roughly 8x of the gap between these tools is
+the inference runtime, not the model.
+
+### With and without the daemon
+
+Every row above is a one-shot run, which loads the model before it can
+recognise anything. The optional [background daemon](#background-daemon-optional-for-faster-startup)
+takes that load out of each invocation and pays it once at login instead,
+worth roughly 0.7s per command. The start-up and run-time table is in
+that section -- kept there rather than repeated here because it was measured
+on a different, faster machine than the comparison above, and the two sets of
+absolute numbers should not be read against each other.
 
 ## Supported Languages
 

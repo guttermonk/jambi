@@ -105,6 +105,14 @@
             mkdir -p $out/share/jambi
             cp ${./assets/microphone.svg} $out/share/jambi/microphone.svg
 
+            # systemd user unit for the daemon, with ExecStart pointed at this
+            # store path so it needs no editing. Shipped but not activated --
+            # see the Daemon section of the README for enabling it.
+            mkdir -p $out/share/systemd/user
+            substitute ${./packaging/systemd/jambi-daemon.service} \
+              $out/share/systemd/user/jambi-daemon.service \
+              --replace-fail "/usr/local/bin/jambi" "$out/bin/jambi"
+
             wrapProgram $out/bin/jambi \
               --prefix PATH : ${pkgs.lib.makeBinPath (with pkgs; [ sox wl-clipboard xclip wtype xdotool libnotify ])} \
               --prefix LD_LIBRARY_PATH : "$out/lib:${pkgs.stdenv.cc.cc.lib}/lib" \
@@ -168,7 +176,13 @@
             fi
             
             export RUSTFLAGS="-L $VOSK_DEV_DIR"
-            export LD_LIBRARY_PATH="$VOSK_DEV_DIR:$LD_LIBRARY_PATH"
+            # libstdc++ alongside libvosk: libvosk.so links against it, and
+            # without this `cargo run`/`cargo test` in the shell die with
+            # "libstdc++.so.6: cannot open shared object file". The packaged
+            # binary gets this from wrapProgram; the dev shell has to say it
+            # itself. Taken from this nixpkgs so it matches the glibc the
+            # toolchain here links against.
+            export LD_LIBRARY_PATH="$VOSK_DEV_DIR:${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
 
             echo "Run 'cargo run' to start jambi"
           '';

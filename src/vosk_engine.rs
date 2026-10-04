@@ -216,7 +216,26 @@ impl VoskEngine {
             model: None,
         })
     }
-    
+
+    /// Build an engine around a model that is already in memory.
+    ///
+    /// This is the daemon's whole reason for existing. `Model::new` costs
+    /// ~800ms and is otherwise paid by every invocation; the daemon pays it
+    /// once at startup and hands the same `Arc<Model>` to each recording, so
+    /// recognition starts as soon as the microphone is open.
+    pub fn with_model(config: VoskConfig, model: Arc<Model>) -> Self {
+        Self {
+            config,
+            model_path: None,
+            model: Some(model),
+        }
+    }
+
+    /// The loaded model, for handing to another engine instance.
+    pub fn loaded_model(&self) -> Option<Arc<Model>> {
+        self.model.clone()
+    }
+
     /// Get the models directory
     fn get_models_dir() -> Result<PathBuf> {
         let cache_dir = dirs::cache_dir()
