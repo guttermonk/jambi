@@ -1,5 +1,27 @@
 # Jambi Configuration File
 # Fast transcription using Vosk speech recognition
+#
+# Copy to ~/.config/jambi/config.toml to have it picked up automatically, or
+# point at it explicitly with `jambi --config <path>`.
+#
+# NOTE: these top-level settings must stay above the first [table] header.
+# A bare key after a header belongs to that table, so moving `mode` below
+# [vosk] would quietly make it `vosk.mode` and have no effect.
+
+# How jambi behaves when launched with no subcommand:
+#
+#   "windowed" - open the interactive TUI (the default, historical behaviour)
+#   "live"     - hold-to-talk dictation: record while the key is held, then
+#                type the transcription at the cursor
+#
+# Override for a single run with `jambi --mode live` / `--mode windowed`.
+mode = "windowed"
+
+# Also copy each transcription to the clipboard
+auto_copy = true
+
+# Keep the recorded .wav files after transcribing them
+keep_recordings = false
 
 [audio]
 sample_rate = 16000
@@ -37,6 +59,19 @@ show_words = true
 # Whether to return partial results during recognition
 partial_results = true
 
-# Top-level application settings
-auto_copy = true
-keep_recordings = false
+# Settings for live dictation (mode = "live"). Ignored in windowed mode.
+[dictate]
+# Milliseconds to wait after the recording stops before typing, so the
+# hotkey's modifiers have time to come back up. Typing while Super is still
+# held turns the text into compositor shortcuts instead of characters.
+# Raise this if the first characters go missing or trigger keybinds.
+modifier_grace_ms = 250
+
+# Per-keystroke delay handed to wtype/xdotool. Some clients drop characters
+# from a zero-delay burst; raise this if text arrives mangled.
+type_delay_ms = 10
+
+# How long `jambi dictate stop` waits for a recorder to appear before giving
+# up. Covers a quick tap where the key is released while the model is still
+# loading, so the stop would otherwise find nothing to signal.
+stop_wait_ms = 2000

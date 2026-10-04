@@ -6,17 +6,18 @@
 use anyhow::{Context, Result};
 use serde::{Serialize, Deserialize};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::time::Duration;
 use tokio::time::timeout;
 
-use tracing::{info, warn, error};
+use tracing::{debug, info, warn, error};
 
 mod audio;
 mod config;
+mod dictate;
 mod vosk_engine;
 
 use audio::{AudioRecorder, AudioConfig};
@@ -47,6 +48,10 @@ struct Cli {
     /// Whisper model to use
     #[arg(short, long)]
     model: Option<String>,
+
+    /// Interaction mode, overriding `mode` in the config file
+    #[arg(long, value_enum)]
+    mode: Option<Mode>,
 }
 
 #[derive(Subcommand)]
@@ -114,13 +119,105 @@ enum Commands {
         #[arg(default_value = "Hello from Jambi! Clipboard test successful.")]
         text: String,
     },
+
+    /// Hold-to-talk dictation, driven by a compositor keybind
+    Dictate {
+        #[command(subcommand)]
+        action: DictateAction,
+    },
+
+    /// Print the active mode and exit
+    ///
+    /// Exists so a keybind wrapper script can branch on the configured mode
+    /// without having to parse config.toml itself.
+    Mode,
+}
+
+#[derive(Subcommand)]
+enum DictateAction {
+    /// Start recording; runs until `stop` signals it
+    Start,
+    /// Stop the running recording and deliver the text
+    Stop,
+}
+
+/// How jambi behaves when launched from its keybind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Open the interactive TUI in a terminal window (the historical behaviour)
+    #[default]
+    Windowed,
+    /// Hold-to-talk dictation that types the result at the cursor
+    Live,
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mode::Windowed => write!(f, "windowed"),
+            Mode::Live => write!(f, "live"),
+        }
+    }
+}
+
+/// Settings specific to live dictation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DictateConfig {
+    /// Milliseconds to wait after recording stops before typing, giving the
+    /// keybind's modifiers time to come back up. See the note in
+    /// `dictate::deliver` for why this is not read from evdev.
+    #[serde(default = "default_modifier_grace_ms")]
+    pub modifier_grace_ms: u64,
+
+    /// Per-keystroke delay passed to wtype/xdotool. Some clients drop
+    /// characters from a zero-delay burst.
+    #[serde(default = "default_type_delay_ms")]
+    pub type_delay_ms: u64,
+
+    /// How long `dictate stop` waits for a recorder to appear before giving up,
+    /// covering the case where the key is released while the model is loading.
+    #[serde(default = "default_stop_wait_ms")]
+    pub stop_wait_ms: u64,
+}
+
+fn default_modifier_grace_ms() -> u64 {
+    250
+}
+
+fn default_type_delay_ms() -> u64 {
+    10
+}
+
+fn default_stop_wait_ms() -> u64 {
+    2000
+}
+
+impl Default for DictateConfig {
+    fn default() -> Self {
+        Self {
+            modifier_grace_ms: default_modifier_grace_ms(),
+            type_delay_ms: default_type_delay_ms(),
+            stop_wait_ms: default_stop_wait_ms(),
+        }
+    }
 }
 
 /// Application state
+///
+/// Every field defaults, so a config file may set as little as `mode = "live"`
+/// and still parse. Before that, `[audio]` and `[vosk]` were mandatory and a
+/// one-line config was a hard error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
     pub vosk: VoskConfig,
+    #[serde(default)]
+    pub mode: Mode,
+    #[serde(default)]
+    pub dictate: DictateConfig,
     #[serde(default = "default_auto_copy")]
     pub auto_copy: bool,
     #[serde(default = "default_keep_recordings")]
@@ -140,6 +237,8 @@ impl Default for AppConfig {
         Self {
             audio: AudioConfig::default(),
             vosk: VoskConfig::default(),
+            mode: Mode::default(),
+            dictate: DictateConfig::default(),
             auto_copy: true,
             keep_recordings: false,
         }
@@ -161,6 +260,10 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = load_config(cli.config.as_deref())?;
 
+    // `--mode` wins over the config file so a single invocation can be forced
+    // into either mode without editing anything.
+    let mode = cli.mode.unwrap_or(config.mode);
+
     // Override model if specified
     let vosk_config = config.vosk.clone();
     if let Some(_model_name) = &cli.model {
@@ -171,6 +274,21 @@ async fn main() -> Result<()> {
 
     // Execute command
     match cli.command {
+        Some(Commands::Mode) => {
+            println!("{}", mode);
+            Ok(())
+        }
+        Some(Commands::Dictate { action }) => {
+            let mut vosk_config = vosk_config;
+            vosk_config.verbose = cli.verbose;
+
+            match action {
+                DictateAction::Start => {
+                    dictate::start(vosk_config, config.dictate, config.auto_copy).await
+                }
+                DictateAction::Stop => dictate::stop(mode, &config.dictate).await,
+            }
+        }
         Some(Commands::Record { auto_start, max_duration, output, live }) => {
             let mut audio_config = config.audio.clone();
             if let Some(output_dir) = output {
@@ -202,9 +320,20 @@ async fn main() -> Result<()> {
             test_clipboard_functionality(&text).await
         }
         _ => {
-            // Default: interactive recording mode
-            let auto_copy = config.auto_copy;
-            run_interactive_mode(config, auto_copy, cli.verbose).await
+            // No subcommand: the configured mode decides. Keeping this in step
+            // with the keybind means `mode = "live"` is not quietly ignored for
+            // anyone who runs a bare `jambi`.
+            match mode {
+                Mode::Windowed => {
+                    let auto_copy = config.auto_copy;
+                    run_interactive_mode(config, auto_copy, cli.verbose).await
+                }
+                Mode::Live => {
+                    let mut vosk_config = vosk_config;
+                    vosk_config.verbose = cli.verbose;
+                    dictate::start(vosk_config, config.dictate, config.auto_copy).await
+                }
+            }
         }
     }
 }
@@ -225,22 +354,41 @@ fn init_logging(verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// Load configuration from file or use defaults
-fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig> {
+/// The config file consulted when `--config` is not given.
+fn default_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("jambi").join("config.toml"))
+}
+
+/// Read and parse a config file.
+fn read_config(path: &Path) -> Result<AppConfig> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+
+    let config: AppConfig = toml::from_str(&contents)
+        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+
+    info!("Loaded configuration from: {}", path.display());
+    Ok(config)
+}
+
+/// Load configuration, preferring an explicit `--config` over the default path.
+///
+/// An explicit path that cannot be read is an error -- the user named it, so
+/// silently falling back to defaults would hide the typo. The default path is
+/// best-effort: not having one is the normal state for a fresh install.
+fn load_config(config_path: Option<&Path>) -> Result<AppConfig> {
     if let Some(path) = config_path {
-        // Load and parse the TOML file
-        let contents = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        
-        let config: AppConfig = toml::from_str(&contents)
-            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
-        
-        info!("Loaded configuration from: {}", path.display());
-        Ok(config)
-    } else {
-        // Use defaults if no config file specified
-        Ok(AppConfig::default())
+        return read_config(path);
     }
+
+    if let Some(path) = default_config_path() {
+        if path.exists() {
+            return read_config(&path);
+        }
+        debug!("no config file at {}, using defaults", path.display());
+    }
+
+    Ok(AppConfig::default())
 }
 
 

@@ -46,6 +46,11 @@
           wl-clipboard
           xclip
           libnotify
+          # Keystroke synthesis for live dictation: wtype on Wayland, xdotool on
+          # X11. Only one is used per session; which one is decided at runtime
+          # from WAYLAND_DISPLAY/DISPLAY.
+          wtype
+          xdotool
         ];
 
         # Build jambi
@@ -84,7 +89,7 @@
             cp $VOSK_LIB_DIR/libvosk.so $out/lib/
             
             wrapProgram $out/bin/jambi \
-              --prefix PATH : ${pkgs.lib.makeBinPath (with pkgs; [ sox wl-clipboard xclip ])} \
+              --prefix PATH : ${pkgs.lib.makeBinPath (with pkgs; [ sox wl-clipboard xclip wtype xdotool libnotify ])} \
               --prefix LD_LIBRARY_PATH : "$out/lib:${pkgs.stdenv.cc.cc.lib}/lib" \
               --set ALSA_PCM_CARD default \
               --set ALSA_PCM_DEVICE 0
@@ -143,7 +148,7 @@
             
             export RUSTFLAGS="-L $VOSK_DEV_DIR"
             export LD_LIBRARY_PATH="$VOSK_DEV_DIR:$LD_LIBRARY_PATH"
-            
+
             echo "Run 'cargo run' to start jambi"
           '';
         };

@@ -144,7 +144,10 @@ impl std::fmt::Display for VoskModel {
 }
 
 /// Vosk transcription configuration
+// See the note on AudioConfig: `serde(default)` keeps every key optional so a
+// config file can set just `model` without restating the rest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VoskConfig {
     /// Model to use for transcription
     pub model: VoskModel,
@@ -589,43 +592,56 @@ impl VoskEngine {
         ]
     }
     
-    /// Live transcription - transcribe audio in real-time as it's being recorded
-    pub async fn transcribe_live(&mut self) -> Result<VoskResult> {
+    /// Stream from the default input device, feeding Vosk as the audio arrives,
+    /// and return the accumulated text once `stop` resolves.
+    ///
+    /// This is the shared engine behind both live-transcription front-ends: the
+    /// windowed TUI stops on Enter and prints as it goes, while live dictation
+    /// stops on a signal and stays silent. What differs between them is only the
+    /// stop future and the two callbacks, so neither owns the recognition loop.
+    ///
+    /// `on_partial` fires with the in-progress guess for the current utterance
+    /// (it is revised repeatedly, so treat it as redraw-in-place, not append).
+    /// `on_segment` fires once per finalised utterance and is append-only.
+    pub async fn transcribe_stream<S>(
+        &mut self,
+        stop: S,
+        mut on_partial: impl FnMut(&str),
+        mut on_segment: impl FnMut(&str),
+    ) -> Result<VoskResult>
+    where
+        S: std::future::Future<Output = ()>,
+    {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         use cpal::{SampleRate, StreamConfig};
         use std::sync::mpsc;
-        use std::io::{self, Write};
-        
+
         // Suppress Vosk's internal debug messages
         vosk::set_log_level(vosk::LogLevel::Error);
-        
-        // Ensure model is loaded
-        if self.model.is_none() {
-            self.load_model().await?;
-        }
-        
-        let model = self.model.as_ref().ok_or_else(|| anyhow::anyhow!("Model not loaded"))?;
-        
-        // Create recognizer with streaming configuration
-        let mut recognizer = Recognizer::new(model, 16000.0)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create recognizer"))?;
-        let _ = recognizer.set_max_alternatives(0);
-        let _ = recognizer.set_words(true);
-        
-        // Set up audio capture
+
+        // Audio capture is opened BEFORE the model is loaded, and the order
+        // matters more than it looks. Loading the small English model costs
+        // ~800ms (the on-disk check beside it is ~1ms -- the time is all in
+        // Vosk's Model::new), and on a push-to-talk key the user is already
+        // speaking during it. Opening the device first costs tens of
+        // milliseconds and lets the capture callback pile samples into the
+        // channel meanwhile, so the first word survives instead of being
+        // clipped. The channel is unbounded and 800ms of 16kHz mono i16 is
+        // ~26KB, so the backlog is free; the drain in the loop below picks it
+        // up on the first poll.
         let host = cpal::default_host();
         let device = host.default_input_device()
             .ok_or_else(|| anyhow::anyhow!("No input device available"))?;
-        
+
         let config = StreamConfig {
             channels: 1,
             sample_rate: SampleRate(16000),
             buffer_size: cpal::BufferSize::Fixed(1024),
         };
-        
+
         // Channel for sending audio data from callback to main thread
         let (tx, rx) = mpsc::channel::<Vec<i16>>();
-        
+
         // Build input stream
         let stream = device.build_input_stream(
             &config,
@@ -639,67 +655,51 @@ impl VoskEngine {
             |err| eprintln!("Audio stream error: {}", err),
             None
         )?;
-        
+
         // Start the audio stream
         stream.play()?;
-        
-        println!("⚠️ Press Enter to stop");
+
+        // Now pay the model cost, with the microphone already live
+        if self.model.is_none() {
+            self.load_model().await?;
+        }
+
+        let model = self.model.as_ref().ok_or_else(|| anyhow::anyhow!("Model not loaded"))?;
+
+        // Create recognizer with streaming configuration
+        let mut recognizer = Recognizer::new(model, 16000.0)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create recognizer"))?;
+        let _ = recognizer.set_max_alternatives(0);
+        let _ = recognizer.set_words(true);
 
         let mut full_text = String::new();
         let mut last_partial = String::new();
-        
-        // Set up Enter key handler
-        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
-        
-        tokio::spawn(async move {
-            let mut buffer = String::new();
-            std::io::stdin().read_line(&mut buffer).unwrap();
-            let _ = stop_tx.send(());
-        });
-        
+        let mut stop = std::pin::pin!(stop);
+
         // Process audio in real-time
         loop {
             tokio::select! {
-                _ = &mut stop_rx => {
-                    println!("⏹️ Stopping live transcription...");
-                    break;
-                }
+                _ = &mut stop => break,
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(10)) => {
                     // Check for audio data
                     while let Ok(samples) = rx.try_recv() {
                         match recognizer.accept_waveform(&samples) {
                             Ok(DecodingState::Running) => {
-                                // Get partial result and display it
-                                let partial = recognizer.partial_result();
-                                // The partial result contains the partial transcription
-                                // Convert to string representation and parse
-                                let partial_str = format!("{:?}", partial);
-                                if partial_str.contains("\"partial\":") {
-                                    // Extract the partial text from the debug string
-                                    if let Some(start) = partial_str.find("\"partial\":\"") {
-                                        let start = start + 11;
-                                        if let Some(end) = partial_str[start..].find('"') {
-                                            let partial_text = &partial_str[start..start + end];
-                                            if partial_text != last_partial && !partial_text.is_empty() {
-                                                // Clear the line and print the partial result
-                                                print!("\r\x1b[K📝 {}", partial_text);
-                                                io::stdout().flush().ok();
-                                                last_partial = partial_text.to_string();
-                                            }
-                                        }
-                                    }
+                                // Revised guess for the utterance still being spoken
+                                let partial = recognizer.partial_result().partial;
+                                if !partial.is_empty() && partial != last_partial {
+                                    on_partial(partial);
+                                    last_partial = partial.to_string();
                                 }
                             }
                             Ok(DecodingState::Finalized) => {
-                                // Get the final result for this segment
-                                let result = recognizer.final_result();
-                                // Use the single() method to get the result
-                                if let Some(single) = result.single() {
+                                // final_result() both reads and resets the
+                                // recognizer, so each utterance is reported once
+                                // and the post-loop call below can only return
+                                // audio this branch has not already consumed.
+                                if let Some(single) = recognizer.final_result().single() {
                                     if !single.text.is_empty() {
-                                        // Clear the line and print the final text
-                                        print!("\r\x1b[K✅ {}\n", single.text);
-                                        io::stdout().flush().ok();
-                                        
+                                        on_segment(single.text);
                                         if !full_text.is_empty() {
                                             full_text.push(' ');
                                         }
@@ -714,27 +714,68 @@ impl VoskEngine {
                 }
             }
         }
-        
-        // Get any remaining text
-        let final_result = recognizer.final_result();
-        if let Some(single) = final_result.single() {
-            if !single.text.is_empty() && single.text != last_partial.as_str() {
-                print!("\r\x1b[K✅ {}\n", single.text);
+
+        // Drain whatever the capture callback queued between the last poll and
+        // the stop. Without this the tail of the final word is dropped, which on
+        // a push-to-talk key is exactly where the user stops speaking.
+        while let Ok(samples) = rx.try_recv() {
+            let _ = recognizer.accept_waveform(&samples);
+        }
+
+        // Flush the utterance in progress when the stop arrived
+        if let Some(single) = recognizer.final_result().single() {
+            if !single.text.is_empty() {
+                on_segment(single.text);
                 if !full_text.is_empty() {
                     full_text.push(' ');
                 }
                 full_text.push_str(single.text);
             }
         }
-        
+
         // Stop the stream
         drop(stream);
-        
+
         Ok(VoskResult {
             text: full_text.trim().to_string(),
             words: None,
             confidence: None,
         })
+    }
+
+    /// Live transcription for the windowed TUI - prints text as you speak and
+    /// stops when the user presses Enter.
+    pub async fn transcribe_live(&mut self) -> Result<VoskResult> {
+        use std::io::{self, Write};
+
+        println!("⚠️ Press Enter to stop");
+
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let _ = std::io::stdin().read_line(&mut buffer);
+            let _ = stop_tx.send(());
+        });
+
+        let result = self
+            .transcribe_stream(
+                async {
+                    let _ = stop_rx.await;
+                },
+                |partial| {
+                    print!("\r\x1b[K📝 {}", partial);
+                    io::stdout().flush().ok();
+                },
+                |segment| {
+                    print!("\r\x1b[K✅ {}\n", segment);
+                    io::stdout().flush().ok();
+                },
+            )
+            .await?;
+
+        println!("⏹️ Stopped live transcription");
+
+        Ok(result)
     }
     
     /// Clean up old models to save disk space

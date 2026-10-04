@@ -11,7 +11,7 @@
     888P"                built with Rust                 
 
 # Jambi
-Jambi's mission is to transcribe audio to your clipboard, as quickly and accurately as possible, while staying privacy-focused and open-source.
+Jambi's mission is to transcribe audio to your clipboard, as quickly and accurately as possible, while staying privacy-focused and open-source — on everyday machines with integrated graphics, not just those with a discrete GPU. That's why it runs on Vosk: recognition happens as you speak, on a couple of CPU cores, where GPU-oriented Whisper models would leave you waiting.
 
 Jambi aims to help computer users with disabilities, such as vision or physical impairments, by providing real-time transcription of their speech. It's also a great tool for anyone who wants to transcribe audio quickly and easily.
 
@@ -120,6 +120,26 @@ Speak freely while your words are converted to text:
 # Press Enter to start, Enter again to stop
 ```
 
+#### Live Dictation (hold-to-talk)
+Dictate into whatever window has focus, with no terminal involved: hold a key,
+speak, release, and the text is typed at the cursor.
+
+Set the mode once in `~/.config/jambi/config.toml`:
+```toml
+mode = "live"
+```
+then bind a key to the two halves of the hold. For Hyprland:
+```
+bind  = SUPER SHIFT, D, exec, jambi dictate start
+bindr = SUPER SHIFT, D, exec, jambi dictate stop
+```
+`start` records until signalled; `stop` signals it and exits immediately. The
+text goes to the cursor via `wtype` (Wayland) or `xdotool` (X11), and to the
+clipboard as well when `auto_copy` is on, so nothing is lost if typing fails.
+
+Because Vosk recognises speech *as you speak*, releasing the key is near
+instant -- there is no post-hoc pass over the clip to wait through.
+
 #### Transcribe File
 Transcribe an existing audio file:
 ```bash
@@ -153,19 +173,36 @@ When verbose mode is disabled (default), the following messages are suppressed:
 
 ### Configuration File
 
-Copy the example configuration and customize it:
+Copy the example configuration to the path Jambi reads by default:
 ```bash
-cp config.example.toml config.toml
+mkdir -p ~/.config/jambi
+cp config.example.toml ~/.config/jambi/config.toml
 ```
 
-Edit `config.toml` to change:
+Any other location works too, passed explicitly:
+```bash
+./jambi --config ./config.toml
+```
+
+Edit it to change:
+- Interaction mode (windowed TUI or live hold-to-talk dictation)
 - Model selection (language)
 - Sample rate
 - Auto-copy to clipboard
 - Output directory
 
+Every key is optional -- a file setting nothing but `mode` is valid, and the
+rest falls back to defaults.
+
 Example configuration:
 ```toml
+# Top-level keys must come BEFORE the first [table] header. A bare key after a
+# header belongs to that table, so `auto_copy` placed below [audio] would
+# silently become `audio.auto_copy` and do nothing.
+mode = "windowed"   # or "live" for hold-to-talk dictation
+auto_copy = true
+keep_recordings = false
+
 [vosk]
 model = "SmallEnUs"  # Options: SmallEnUs, SmallEs, SmallFr, etc.
 sample_rate = 16000.0
@@ -176,8 +213,18 @@ sample_rate = 16000
 channels = 1
 output_dir = "~/jambi_recordings"
 
-auto_copy = true
-keep_recordings = false
+[dictate]            # only used when mode = "live"
+modifier_grace_ms = 250  # wait for hotkey modifiers to lift before typing
+type_delay_ms = 10       # per-keystroke delay for wtype/xdotool
+```
+
+### Command-Line Mode Override
+
+`--mode` overrides whatever the config file says, for a single run:
+```bash
+./jambi --mode live       # force hold-to-talk dictation
+./jambi --mode windowed   # force the interactive TUI
+./jambi mode              # print the mode currently in effect
 ```
 
 ## Project Structure

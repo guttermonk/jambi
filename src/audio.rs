@@ -21,7 +21,13 @@ use tracing::{info, warn, error};
 
 
 /// Audio recording configuration
+// `serde(default)` at the container level so a config file may set only the
+// keys it cares about. Without it every field was mandatory once an [audio]
+// table was present, which made even config.example.toml fail to parse on
+// `verbose` -- a runtime flag that main.rs overwrites from --verbose anyway and
+// that no user would think to put in a config file.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct AudioConfig {
     /// Sample rate in Hz (typically 16000 for speech)
     pub sample_rate: u32,
