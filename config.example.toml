@@ -76,6 +76,17 @@ type_delay_ms = 10
 # loading, so the stop would otherwise find nothing to signal.
 stop_wait_ms = 2000
 
+# Show desktop notifications at all.
+#
+# On by default. Live dictation runs detached from a keybind, so a popup is
+# the only thing that reports a microphone that would not open or speech that
+# was not recognised -- turning this off silences those failures along with
+# the progress.
+#
+# "Done" is sent as transient either way, so a dictation habit does not fill
+# the notification centre with it; the failures are kept.
+notifications = true
+
 # Absolute path to the icon shown on notifications. Unset uses the glyph the
 # package ships (white strokes, reads on a dark panel); an entry naming a file
 # that does not exist falls back to no icon rather than a broken image.

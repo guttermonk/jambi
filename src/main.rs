@@ -226,6 +226,15 @@ pub struct DictateConfig {
     #[serde(default = "default_stop_wait_ms")]
     pub stop_wait_ms: u64,
 
+    /// Show desktop notifications at all.
+    ///
+    /// On by default: live dictation runs detached from a keybind, so a
+    /// notification is the only thing that reports a microphone that would not
+    /// open or speech that was not recognised. Turning it off silences the
+    /// failures as well as the progress, which is the trade.
+    #[serde(default = "default_notifications")]
+    pub notifications: bool,
+
     /// Absolute path to the icon shown on notifications. Falls back to
     /// JAMBI_ICON (the glyph the package ships) when unset, and to no icon at
     /// all when neither names a file that exists.
@@ -247,6 +256,10 @@ fn default_type_delay_ms() -> u64 {
 
 fn default_stop_wait_ms() -> u64 {
     2000
+}
+
+fn default_notifications() -> bool {
+    true
 }
 
 /// Settings for the background daemon that keeps the model warm.
@@ -314,6 +327,7 @@ impl Default for DictateConfig {
             modifier_grace_ms: default_modifier_grace_ms(),
             type_delay_ms: default_type_delay_ms(),
             stop_wait_ms: default_stop_wait_ms(),
+            notifications: default_notifications(),
             icon: None,
         }
     }

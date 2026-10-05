@@ -356,6 +356,7 @@ output_dir = "~/jambi_recordings"
 [dictate]            # only used when mode = "live"
 modifier_grace_ms = 250  # wait for hotkey modifiers to lift before typing
 type_delay_ms = 10       # per-keystroke delay for wtype/xdotool
+notifications = true     # false to silence popups entirely
 # icon = "/home/you/.icons/microphone.svg"  # see Notifications below
 
 [daemon]                   # see Background Daemon above
@@ -374,6 +375,12 @@ popup rather than stacking: listening, then done, or the specific failure
 (microphone unavailable, no speech detected, typing failed with the text
 left on the clipboard). These matter more than usual in live mode, since it
 runs detached from a keybind and nothing else would surface an error.
+
+"Done" is sent with the specification's `transient` hint, so it clears from
+the notification centre rather than accumulating there; the failures are kept.
+Set `notifications = false` under `[dictate]` to stop sending popups at all --
+which silences the failures too, so it trades away the only report live mode
+has.
 
 "Listening..." stays up for as long as you hold the key, rather than timing
 out part-way through: a recording has no fixed length, and a popup that

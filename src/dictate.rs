@@ -420,7 +420,53 @@ impl Expiry {
     const WHILE_DELIVERING: Self = Self(60_000);
 }
 
+/// Whether the notification daemon should keep a popup in its history once it
+/// has expired.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Persistence {
+    /// Stays in the notification centre's list, to be read later.
+    Kept,
+    /// Dropped the moment it expires, via the specification's `transient`
+    /// hint. For a popup whose only job is to say an operation finished: it
+    /// has nothing to tell anyone after the fact, and a dictation habit would
+    /// otherwise fill the notification centre with "Done".
+    Transient,
+}
+
 fn notify(config: &DictateConfig, body: &str, expiry: Expiry) {
+    send(config, body, expiry, Persistence::Kept);
+}
+
+/// As `notify`, for a popup not worth keeping once it has been seen.
+fn notify_transient(config: &DictateConfig, body: &str, expiry: Expiry) {
+    send(config, body, expiry, Persistence::Transient);
+}
+
+fn send(config: &DictateConfig, body: &str, expiry: Expiry, persistence: Persistence) {
+    let Some(args) = notify_args(config, body, expiry, persistence) else {
+        debug!("notifications are off, not reporting: {}", body);
+        return;
+    };
+
+    let _ = std::process::Command::new("notify-send").args(&args).status();
+}
+
+/// The notify-send arguments for one popup, or `None` when notifications are
+/// turned off.
+///
+/// Separate from the spawn so the two things worth getting right -- the hints,
+/// and whether anything is sent at all -- can be tested without a notification
+/// daemon to talk to.
+fn notify_args(
+    config: &DictateConfig,
+    body: &str,
+    expiry: Expiry,
+    persistence: Persistence,
+) -> Option<Vec<String>> {
+    if !config.notifications {
+        return None;
+    }
+
     let mut args: Vec<String> = Vec::new();
 
     if let Some(path) = icon(config) {
@@ -433,12 +479,18 @@ fn notify(config: &DictateConfig, body: &str, expiry: Expiry) {
     // This is also what retires a `UntilReplaced` popup.
     args.push("-h".into());
     args.push("string:x-canonical-private-synchronous:jambi".into());
+
+    if persistence == Persistence::Transient {
+        args.push("-h".into());
+        args.push("boolean:transient:true".into());
+    }
+
     args.push("-t".into());
     args.push(expiry.0.to_string());
     args.push("Jambi".into());
     args.push(body.into());
 
-    let _ = std::process::Command::new("notify-send").args(&args).status();
+    Some(args)
 }
 
 /// Type the text at the cursor, falling back to the clipboard if no typing tool
@@ -470,7 +522,7 @@ async fn deliver(text: &str, config: &DictateConfig, auto_copy: bool) {
     }
 
     match type_text(text, config).await {
-        Ok(()) => notify(config, "✅ Done", Expiry::BRIEF),
+        Ok(()) => notify_transient(config, "✅ Done", Expiry::BRIEF),
         Err(e) => {
             warn!("failed to type text: {}", e);
             if copied {
@@ -517,4 +569,63 @@ async fn type_text(text: &str, config: &DictateConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(notifications: bool) -> DictateConfig {
+        DictateConfig {
+            notifications,
+            // Keep the icon out of it: `icon()` consults JAMBI_ICON and the
+            // filesystem, neither of which these assertions are about.
+            icon: Some("/nonexistent/icon.svg".into()),
+            ..DictateConfig::default()
+        }
+    }
+
+    fn args(notifications: bool, persistence: Persistence) -> Option<Vec<String>> {
+        notify_args(&config(notifications), "body", Expiry::BRIEF, persistence)
+    }
+
+    /// `notifications = false` has to stop the popup being sent at all, not
+    /// merely shorten it.
+    #[test]
+    fn turning_notifications_off_sends_nothing() {
+        assert!(args(false, Persistence::Kept).is_none());
+        assert!(args(false, Persistence::Transient).is_none());
+        assert!(args(true, Persistence::Kept).is_some());
+    }
+
+    /// The transient hint is what keeps "Done" out of the notification
+    /// centre's history once it has been seen.
+    #[test]
+    fn only_transient_popups_carry_the_transient_hint() {
+        let transient = args(true, Persistence::Transient).unwrap();
+        let kept = args(true, Persistence::Kept).unwrap();
+
+        assert!(
+            transient.iter().any(|a| a == "boolean:transient:true"),
+            "transient popup lacks the hint: {transient:?}"
+        );
+        assert!(
+            !kept.iter().any(|a| a == "boolean:transient:true"),
+            "kept popup carries the hint: {kept:?}"
+        );
+    }
+
+    /// Transience must not cost the replacement hint, which is what stops a
+    /// dictation cycle stacking four popups.
+    #[test]
+    fn every_popup_still_replaces_the_last() {
+        for persistence in [Persistence::Kept, Persistence::Transient] {
+            let args = args(true, persistence).unwrap();
+            assert!(
+                args.iter()
+                    .any(|a| a == "string:x-canonical-private-synchronous:jambi"),
+                "{persistence:?} lost the replacement hint: {args:?}"
+            );
+        }
+    }
 }
