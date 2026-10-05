@@ -3,7 +3,7 @@
 //! This module provides an alternative to Whisper using Vosk, which is
 //! specifically optimized for real-time CPU-based speech recognition.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -194,6 +194,147 @@ pub struct WordInfo {
     pub start: f32,
     pub end: f32,
     pub confidence: f32,
+}
+
+/// Decoded audio, ready for the recogniser: a single channel, carrying the
+/// rate the file declared rather than the one the config assumed.
+///
+/// The rate travels with the samples deliberately. It used to be dropped on
+/// the floor -- the header was never read, and every file was handed to Vosk
+/// as though it were `vosk.sample_rate` -- so an ordinary 44.1kHz recording was
+/// decoded at 16kHz and transcribed into nonsense, with nothing to indicate
+/// anything had gone wrong.
+#[derive(Debug)]
+struct Pcm {
+    samples: Vec<i16>,
+    sample_rate: f32,
+}
+
+/// Read a WAV file into mono samples at its own rate.
+fn read_wav(path: &Path) -> Result<Pcm> {
+    use hound::{SampleFormat, WavReader};
+    use std::fs::File;
+    use std::io::{BufReader, Read, Seek};
+
+    let mut file = File::open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+
+    // Sniffed before handing the file to hound, whose complaint for anything
+    // else is "Ill-formed WAVE file: no RIFF tag found" -- true, but it never
+    // occurs to someone holding an .m4a that WAV was ever the requirement.
+    let mut header = [0u8; 12];
+    let read = file.read(&mut header)?;
+    let header = &header[..read];
+    if !(starts_with(header, 0, b"RIFF") && starts_with(header, 8, b"WAVE")) {
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        anyhow::bail!(
+            "{} is {}, and jambi reads WAV.\n\
+             Convert it first, to mono at the rate the model wants:\n    \
+             ffmpeg -i {} -ar 16000 -ac 1 {}.wav",
+            path.display(),
+            describe_format(header),
+            path.display(),
+            stem,
+        );
+    }
+    file.rewind()?;
+
+    let mut wav = WavReader::new(BufReader::new(file))
+        .with_context(|| format!("cannot read {} as WAV", path.display()))?;
+    let spec = wav.spec();
+
+    // Widened or scaled to i16, which is what Vosk takes. A 24-bit or float
+    // WAV is ordinary output from any recorder or DAW, and reading one as i16
+    // outright is an error rather than a conversion.
+    let interleaved: Vec<i16> = match (spec.sample_format, spec.bits_per_sample) {
+        (SampleFormat::Int, 0..=16) => wav
+            .samples::<i16>()
+            .collect::<std::result::Result<_, _>>()?,
+        (SampleFormat::Int, bits) => {
+            let shift = bits - 16;
+            wav.samples::<i32>()
+                .map(|s| s.map(|s| (s >> shift) as i16))
+                .collect::<std::result::Result<_, _>>()?
+        }
+        (SampleFormat::Float, _) => wav
+            .samples::<f32>()
+            .map(|s| s.map(|s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16))
+            .collect::<std::result::Result<_, _>>()?,
+    };
+
+    let samples = downmix(interleaved, spec.channels);
+
+    debug!(
+        "{}: {}Hz, {} channel(s), {} bit {:?} -> {} mono samples",
+        path.display(),
+        spec.sample_rate,
+        spec.channels,
+        spec.bits_per_sample,
+        spec.sample_format,
+        samples.len()
+    );
+
+    Ok(Pcm {
+        samples,
+        sample_rate: spec.sample_rate as f32,
+    })
+}
+
+/// Average the channels of interleaved audio down to one.
+///
+/// Vosk takes mono. Feeding it interleaved stereo hands it two channels'
+/// samples as though they were one channel at twice the rate, which recognises
+/// as nothing at all.
+fn downmix(interleaved: Vec<i16>, channels: u16) -> Vec<i16> {
+    if channels <= 1 {
+        return interleaved;
+    }
+
+    interleaved
+        .chunks_exact(channels as usize)
+        .map(|frame| {
+            let sum: i32 = frame.iter().map(|&s| i32::from(s)).sum();
+            (sum / frame.len() as i32) as i16
+        })
+        .collect()
+}
+
+fn starts_with(header: &[u8], offset: usize, tag: &[u8]) -> bool {
+    header.len() >= offset + tag.len() && &header[offset..offset + tag.len()] == tag
+}
+
+/// Name what a file's leading bytes say it actually is.
+///
+/// Only ever used to make the "this is not a WAV" error say something the
+/// reader can act on; the extension is not consulted, because a mislabelled
+/// file is exactly the case where a confusing error is most likely.
+fn describe_format(header: &[u8]) -> &'static str {
+    let mp3_frame = header.first() == Some(&0xFF)
+        && header.get(1).is_some_and(|b| b & 0xE0 == 0xE0);
+
+    if starts_with(header, 4, b"ftyp") {
+        "MPEG-4 audio (m4a/aac)"
+    } else if starts_with(header, 0, b"fLaC") {
+        "FLAC"
+    } else if starts_with(header, 0, b"OggS") {
+        "Ogg (vorbis or opus)"
+    } else if starts_with(header, 0, b"ID3") || mp3_frame {
+        "MP3"
+    } else if starts_with(header, 0, b"FORM")
+        && (starts_with(header, 8, b"AIFF") || starts_with(header, 8, b"AIFC"))
+    {
+        "AIFF"
+    } else if starts_with(header, 0, b"caff") {
+        "CAF"
+    } else if starts_with(header, 0, b"wvpk") {
+        "WavPack"
+    } else if starts_with(header, 0, b"\x1a\x45\xdf\xa3") {
+        "Matroska or WebM"
+    } else if starts_with(header, 0, b"RIFF") {
+        "a RIFF file but not WAVE"
+    } else {
+        "not audio jambi recognises"
+    }
 }
 
 /// Vosk speech recognition engine
@@ -553,44 +694,27 @@ impl VoskEngine {
             return Err(anyhow::anyhow!("Model not loaded. Call load_model() first"));
         }
         
-        // Read audio file
-        let audio_data = self.read_audio_file(audio_path).await?;
-        
-        // Transcribe
-        let result = self.transcribe(&audio_data, self.config.sample_rate).await?;
-        
+        // The rate comes from the file, never from the config. Vosk's
+        // `Recognizer::new` documents its parameter as "the sample rate of the
+        // audio you going to feed into the recognizer" and resamples to the
+        // model's rate itself, so declaring the truth is both correct and
+        // enough.
+        let audio = self.read_audio_file(audio_path).await?;
+
+        let result = self.transcribe(&audio.samples, audio.sample_rate).await?;
+
         if self.config.verbose {
-            info!("Transcription complete: {} words", 
+            info!("Transcription complete: {} words",
                   result.text.split_whitespace().count());
         }
-        
+
         Ok(result)
     }
-    
-    /// Read audio file and convert to i16 samples
-    async fn read_audio_file(&self, audio_path: &Path) -> Result<Vec<i16>> {
-        use hound::WavReader;
-        use std::fs::File;
-        use std::io::BufReader;
-        
-        // For now, we assume WAV format
-        // In production, you'd want to use ffmpeg to convert any format to WAV
-        
+
+    /// Read an audio file into mono samples at the file's own rate.
+    async fn read_audio_file(&self, audio_path: &Path) -> Result<Pcm> {
         let file_path = audio_path.to_path_buf();
-        
-        let samples = tokio::task::spawn_blocking(move || -> Result<Vec<i16>> {
-            let file = File::open(&file_path)?;
-            let reader = BufReader::new(file);
-            let mut wav_reader = WavReader::new(reader)?;
-            
-            let samples: Vec<i16> = wav_reader
-                .samples::<i16>()
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            
-            Ok(samples)
-        }).await??;
-        
-        Ok(samples)
+        tokio::task::spawn_blocking(move || read_wav(&file_path)).await?
     }
     
     /// Get available models
@@ -845,5 +969,102 @@ mod tests {
         let config = VoskConfig::default();
         let engine = VoskEngine::new(config);
         assert!(engine.is_ok());
+    }
+
+    /// Write a WAV of `channels` channels at `rate`, for the reader tests.
+    fn write_wav(path: &std::path::Path, rate: u32, channels: u16, frames: &[i16]) {
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate: rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for &frame in frames {
+            for _ in 0..channels {
+                writer.write_sample(frame).unwrap();
+            }
+        }
+        writer.finalize().unwrap();
+    }
+
+    /// The bug this replaced: the header was never read, so every file was
+    /// transcribed as though it were the rate in the config. A 44.1kHz file
+    /// went to Vosk labelled 16kHz and came back as nonsense, silently.
+    #[test]
+    fn the_rate_comes_from_the_file_not_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for rate in [8_000, 16_000, 44_100, 48_000] {
+            let path = dir.path().join(format!("{rate}.wav"));
+            write_wav(&path, rate, 1, &[0, 1000, -1000, 0]);
+
+            let pcm = read_wav(&path).unwrap();
+            assert_eq!(
+                pcm.sample_rate, rate as f32,
+                "{rate}Hz file reported {}Hz",
+                pcm.sample_rate
+            );
+        }
+    }
+
+    /// Stereo has to be averaged down, not handed over interleaved -- which
+    /// would be two channels' samples read as one channel at twice the rate.
+    #[test]
+    fn channels_are_mixed_down_to_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let frames = [0i16, 1000, -1000, 500];
+
+        for channels in [1u16, 2] {
+            let path = dir.path().join(format!("{channels}ch.wav"));
+            write_wav(&path, 16_000, channels, &frames);
+
+            let pcm = read_wav(&path).unwrap();
+            assert_eq!(
+                pcm.samples.len(),
+                frames.len(),
+                "{channels} channels produced {} samples for {} frames",
+                pcm.samples.len(),
+                frames.len()
+            );
+            assert_eq!(pcm.samples, frames, "{channels} channels changed the audio");
+        }
+    }
+
+    #[test]
+    fn downmix_averages_each_frame() {
+        assert_eq!(downmix(vec![100, 200, -100, 100], 2), vec![150, 0]);
+        assert_eq!(downmix(vec![1, 2, 3], 1), vec![1, 2, 3]);
+    }
+
+    /// The reported bug: an .m4a produced "Ill-formed WAVE file: no RIFF tag
+    /// found", which is true and useless. The error has to name the format and
+    /// say what to do.
+    #[test]
+    fn a_non_wav_file_is_reported_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.m4a");
+        // The ftyp box an MPEG-4 file opens with.
+        std::fs::write(&path, b"\0\0\0\x20ftypM4A \0\0\0\0M4A mp42isom").unwrap();
+
+        let error = read_wav(&path).unwrap_err().to_string();
+        assert!(error.contains("MPEG-4"), "did not name the format: {error}");
+        assert!(error.contains("ffmpeg"), "did not say how to convert: {error}");
+        assert!(
+            !error.contains("RIFF tag"),
+            "still leaks hound's wording: {error}"
+        );
+    }
+
+    #[test]
+    fn formats_are_told_apart_by_their_leading_bytes() {
+        assert_eq!(describe_format(b"fLaC\0\0\0\0"), "FLAC");
+        assert_eq!(describe_format(b"OggS\0\0\0\0"), "Ogg (vorbis or opus)");
+        assert_eq!(describe_format(b"ID3\x04\0\0\0\0"), "MP3");
+        assert_eq!(describe_format(b"\0\0\0 ftypM4A "), "MPEG-4 audio (m4a/aac)");
+        assert_eq!(describe_format(b"FORM\0\0\0\0AIFF"), "AIFF");
+        // Short reads must not panic.
+        assert_eq!(describe_format(b""), "not audio jambi recognises");
+        assert_eq!(describe_format(b"ID"), "not audio jambi recognises");
     }
 }
