@@ -35,15 +35,15 @@ pub enum TrayIcon {
     Lamp,
 }
 
-/// The colour the glyph is drawn in.
+/// The color the glyph is drawn in.
 ///
 /// Named for the ink rather than the desktop, because "dark mode" is ambiguous
 /// about which one it asks for: a dark panel needs a *light* icon. The `dark`
-/// and `light` aliases accept the other vocabulary and map to the colour that
+/// and `light` aliases accept the other vocabulary and map to the color that
 /// suits a panel of that shade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
-pub enum TrayColour {
+pub enum TrayColor {
     /// Near-white, for a dark panel.
     #[default]
     #[serde(alias = "dark")]
@@ -56,10 +56,29 @@ pub enum TrayColour {
 /// How the indicator looks. Comes from config and does not change while the
 /// daemon runs, which is why it is kept apart from the `TrayState` below.
 #[cfg_attr(not(feature = "tray"), allow(dead_code))]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct TrayStyle {
     pub icon: TrayIcon,
-    pub colour: TrayColour,
+    pub color: TrayColor,
+    /// Turn the glyph red while a recording is in progress.
+    ///
+    /// On by default: it is the only at-a-glance sign that a dictation whose
+    /// key release went missing is still holding the microphone. Turning it off
+    /// does not hide that state, it just stops announcing it in color -- the
+    /// tooltip and the menu still say "Recording".
+    pub red_when_recording: bool,
+}
+
+/// Hand-written rather than derived: `red_when_recording` has to default to
+/// true, and `bool`'s own default is false.
+impl Default for TrayStyle {
+    fn default() -> Self {
+        Self {
+            icon: TrayIcon::default(),
+            color: TrayColor::default(),
+            red_when_recording: true,
+        }
+    }
 }
 
 /// What the indicator displays. Mirrored from the daemon rather than read back
@@ -83,8 +102,13 @@ mod imp {
     use ksni::menu::StandardItem;
     use ksni::{Category, Icon, MenuItem, Status, ToolTip, TrayMethods};
 
-    /// Sizes offered to the host. A tray host picks the closest to its panel
-    /// height, and offering several avoids it scaling one up into mush.
+    /// Pixmap heights offered to the host. A tray host picks the closest to its
+    /// panel height, and offering several avoids it scaling one up into mush.
+    ///
+    /// Heights rather than squares: the pixmaps are cropped to their glyph, so
+    /// width follows from the shape. Hosts scale an icon to the panel's height
+    /// and take the width from the aspect ratio, which is the dimension worth
+    /// supplying at native resolution.
     const SIZES: [u32; 5] = [16, 22, 24, 32, 48];
 
     struct JambiTray {
@@ -116,11 +140,10 @@ mod imp {
         }
 
         fn icon_pixmap(&self) -> Vec<Icon> {
-            let (idle, recording) = palette(self.style.colour);
-            let colour = if self.state.recording { recording } else { idle };
+            let color = ink(self.style, self.state.recording);
             SIZES
                 .iter()
-                .map(|&size| render(self.style.icon, size, colour))
+                .map(|&size| render(self.style.icon, size, color))
                 .collect()
         }
 
@@ -225,22 +248,36 @@ mod imp {
 
     /// Non-premultiplied ARGB, as the StatusNotifierItem specification's
     /// `IconPixmap` wants. Alpha comes from coverage, so these are the opaque
-    /// colours of the strokes.
+    /// colors of the strokes.
     type Rgb = [u8; 3];
 
-    /// The idle and recording colours for a chosen ink.
+    /// The idle and recording colors for a chosen ink.
     ///
     /// Recording stays red in both, because it reports state rather than
     /// following the theme -- but the shade differs, since the red that reads
     /// best on a dark panel is washed out on a light one.
-    fn palette(colour: TrayColour) -> (Rgb, Rgb) {
-        match colour {
+    fn palette(color: TrayColor) -> (Rgb, Rgb) {
+        match color {
             // Near-white rather than pure, matching the notification glyph in
             // `assets/`, which reads on the dark panel a tray usually sits on.
-            TrayColour::White => ([0xEC, 0xEF, 0xF4], [0xE5, 0x4B, 0x4B]),
+            TrayColor::White => ([0xEC, 0xEF, 0xF4], [0xE5, 0x4B, 0x4B]),
             // Near-black rather than pure, which sits heavily beside themed
             // panel icons, with a deeper red to match.
-            TrayColour::Black => ([0x2E, 0x34, 0x40], [0xC0, 0x39, 0x2B]),
+            TrayColor::Black => ([0x2E, 0x34, 0x40], [0xC0, 0x39, 0x2B]),
+        }
+    }
+
+    /// The color to draw in, for a given style and recording state.
+    ///
+    /// Separate from `icon_pixmap` so it can be tested without standing up a
+    /// tray service: that the recording tint can be switched off is the kind
+    /// of thing that silently stops working.
+    fn ink(style: TrayStyle, recording: bool) -> Rgb {
+        let (idle, active) = palette(style.color);
+        if recording && style.red_when_recording {
+            active
+        } else {
+            idle
         }
     }
 
@@ -363,18 +400,21 @@ mod imp {
     const LAMP_RIGHT: f32 = 0.877;
     const LAMP_BOTTOM: f32 = 0.745;
 
-    /// Fraction of the icon a glyph's binding dimension fills.
+    /// Fraction of the pixmap the glyph fills, in both directions.
     ///
-    /// The microphone's geometry is laid out with a generous margin, spanning
-    /// only ~0.81 of its square vertically. Rendered straight, that margin is
-    /// dead space inside the pixmap and the icon reads a size smaller than
-    /// everything beside it in the tray. Fitting the glyph's own bounding box
-    /// uses the room the host actually gave us. Short of 1.0 so the antialiased
-    /// edge has somewhere to land rather than being clipped flat against the
-    /// border.
+    /// Short of 1.0 only so the antialiased edge has somewhere to land rather
+    /// than being clipped flat against the border. Everything else is cropping
+    /// rather than margin -- see `render`.
     const GLYPH_FILL: f32 = 0.96;
 
-    /// Draw `icon` at `size` square, in `colour`.
+    /// Draw `icon` at `height` pixels tall, in `color`.
+    ///
+    /// The pixmap is cropped to the glyph rather than padded out to a square.
+    /// That is what keeps the icon spaced like its neighbours in the tray: a
+    /// host lays an item out at the pixmap's own width, so transparent columns
+    /// inside the pixmap become visible gaps either side of the glyph. The
+    /// microphone is barely two thirds as wide as it is tall, which read as
+    /// noticeably more air around it than around everything else on the bar.
     ///
     /// Drawn rather than decoded from a bitmap, which buys three things worth
     /// more than the arithmetic below: no image-decoding dependency, no second
@@ -382,35 +422,35 @@ mod imp {
     /// crisp result at whatever size the host asks for instead of one blurred
     /// from a single bitmap. The shipped SVG cannot be used directly -- the
     /// specification takes pixels, not vectors.
-    fn render(icon: TrayIcon, size: u32, colour: Rgb) -> Icon {
+    fn render(icon: TrayIcon, height: u32, color: Rgb) -> Icon {
         let shape = glyph(icon);
 
         /// Samples per axis. 3x3 is enough to take the stair-steps off strokes
         /// this thick, and keeps a 16px icon at 2,304 distance evaluations.
         const SAMPLES: u32 = 3;
 
-        let mut data = vec![0u8; (size * size * 4) as usize];
-        let pixels = size as f32;
+        // One scale for both axes, derived from the height, with the width
+        // following the glyph's aspect. Deriving each axis from its own extent
+        // would let rounding stretch the drawing.
+        let units_per_px = shape.height() / GLYPH_FILL / height as f32;
+        let width = ((shape.width() / GLYPH_FILL) / units_per_px).round().max(1.0) as u32;
 
-        // Fits the glyph's bounding box into the square pixmap, scaled by
-        // whichever dimension binds and centred on the box in both axes. One
-        // span for both axes, not two: scaling each to fill independently
-        // would stretch the microphone narrow and the lamp tall.
-        let span = shape.width().max(shape.height()) / GLYPH_FILL;
         let centre_u = (shape.left + shape.right) / 2.0;
         let centre_v = (shape.top + shape.bottom) / 2.0;
 
-        for y in 0..size {
-            for x in 0..size {
+        let mut data = vec![0u8; (width * height * 4) as usize];
+
+        for y in 0..height {
+            for x in 0..width {
                 let mut hits = 0u32;
                 for sy in 0..SAMPLES {
                     for sx in 0..SAMPLES {
                         // Sample at subpixel centres, so coverage is symmetric
                         // about the pixel rather than biased to one corner.
-                        let px = (x as f32 + (sx as f32 + 0.5) / SAMPLES as f32) / pixels;
-                        let py = (y as f32 + (sy as f32 + 0.5) / SAMPLES as f32) / pixels;
-                        let u = centre_u + (px - 0.5) * span;
-                        let v = centre_v + (py - 0.5) * span;
+                        let px = x as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
+                        let py = y as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
+                        let u = centre_u + (px - width as f32 / 2.0) * units_per_px;
+                        let v = centre_v + (py - height as f32 / 2.0) * units_per_px;
                         if (shape.inside)(u, v) {
                             hits += 1;
                         }
@@ -418,17 +458,17 @@ mod imp {
                 }
 
                 let alpha = (hits * 255 / (SAMPLES * SAMPLES)) as u8;
-                let offset = ((y * size + x) * 4) as usize;
+                let offset = ((y * width + x) * 4) as usize;
                 data[offset] = alpha;
-                data[offset + 1] = colour[0];
-                data[offset + 2] = colour[1];
-                data[offset + 3] = colour[2];
+                data[offset + 1] = color[0];
+                data[offset + 2] = color[1];
+                data[offset + 3] = color[2];
             }
         }
 
         Icon {
-            width: size as i32,
-            height: size as i32,
+            width: width as i32,
+            height: height as i32,
             data,
         }
     }
@@ -516,12 +556,17 @@ mod imp {
 
     #[cfg(test)]
     pub(super) fn test_icon(icon: TrayIcon, size: u32) -> Icon {
-        render(icon, size, palette(TrayColour::White).0)
+        render(icon, size, palette(TrayColor::White).0)
     }
 
     #[cfg(test)]
-    pub(super) fn test_palette(colour: TrayColour) -> (Rgb, Rgb) {
-        palette(colour)
+    pub(super) fn test_palette(color: TrayColor) -> (Rgb, Rgb) {
+        palette(color)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_ink(style: TrayStyle, recording: bool) -> Rgb {
+        ink(style, recording)
     }
 
     /// A glyph's own bounding box, found by sampling rather than read off the
@@ -589,21 +634,28 @@ pub use imp::Tray;
 #[cfg(all(test, feature = "tray"))]
 mod tests {
     use super::imp;
-    use super::{TrayColour, TrayIcon};
+    use super::{TrayColor, TrayIcon, TrayStyle};
 
     const ICONS: [TrayIcon; 2] = [TrayIcon::Microphone, TrayIcon::Lamp];
     const SIZES: [u32; 5] = [16, 22, 24, 32, 48];
 
-    /// Every size the host may ask for has to come back as a correctly sized
-    /// ARGB32 buffer; a short one is read past the end by the host.
+    /// Every size the host may ask for has to come back as a buffer matching
+    /// its declared dimensions; a short one is read past the end by the host.
+    /// The height is what was asked for, and the width follows the glyph.
     #[test]
     fn every_icon_size_is_a_complete_argb_buffer() {
         for icon in ICONS {
             for size in SIZES {
                 let rendered = imp::test_icon(icon, size);
-                assert_eq!(rendered.width, size as i32);
-                assert_eq!(rendered.height, size as i32);
-                assert_eq!(rendered.data.len(), (size * size * 4) as usize);
+                assert_eq!(rendered.height, size as i32, "{icon:?} at {size}");
+                assert!(rendered.width > 0, "{icon:?} at {size}: zero width");
+                assert_eq!(
+                    rendered.data.len(),
+                    (rendered.width * rendered.height * 4) as usize,
+                    "{icon:?} at {size}: buffer does not match {}x{}",
+                    rendered.width,
+                    rendered.height
+                );
             }
         }
     }
@@ -615,15 +667,65 @@ mod tests {
         for icon in ICONS {
             let rendered = imp::test_icon(icon, 32);
             let opaque = rendered.data.chunks_exact(4).filter(|p| p[0] > 128).count();
-            let total = (32 * 32) as usize;
+            let total = (rendered.width * rendered.height) as usize;
+            assert!(opaque > total / 50, "{icon:?} is nearly blank: {opaque} px");
             assert!(
-                opaque > total / 50,
-                "{icon:?} is nearly blank: {opaque} px"
+                opaque < total * 7 / 8,
+                "{icon:?} covers the whole pixmap: {opaque} px"
+            );
+        }
+    }
+
+    /// The pixmap must be cropped to the glyph, not padded out to a square.
+    /// Transparent columns inside it become visible gaps either side of the
+    /// icon, which is what made this one sit further from its neighbours than
+    /// they sit from each other.
+    #[test]
+    fn pixmaps_are_cropped_to_their_glyph() {
+        for icon in ICONS {
+            let rendered = imp::test_icon(icon, 32);
+            let (w, h) = (rendered.width as usize, rendered.height as usize);
+            let opaque = |x: usize, y: usize| rendered.data[(y * w + x) * 4] > 0;
+
+            let rows: Vec<usize> = (0..h).filter(|&y| (0..w).any(|x| opaque(x, y))).collect();
+            let cols: Vec<usize> = (0..w).filter(|&x| (0..h).any(|y| opaque(x, y))).collect();
+
+            assert!(
+                *rows.first().unwrap() <= 1 && *rows.last().unwrap() >= h - 2,
+                "{icon:?}: dead rows, glyph spans {}..{} of {h}",
+                rows.first().unwrap(),
+                rows.last().unwrap()
             );
             assert!(
-                opaque < total * 3 / 4,
-                "{icon:?} covers the whole icon: {opaque} px"
+                *cols.first().unwrap() <= 1 && *cols.last().unwrap() >= w - 2,
+                "{icon:?}: dead columns, glyph spans {}..{} of {w}",
+                cols.first().unwrap(),
+                cols.last().unwrap()
             );
+        }
+    }
+
+    /// Cropping must not stretch the drawing: the pixmap's aspect has to track
+    /// the glyph's own, or the microphone comes out fat and the lamp squashed.
+    #[test]
+    fn pixmap_aspect_follows_the_glyph() {
+        for icon in ICONS {
+            let (left, top, right, bottom) = imp::declared_bounds(icon);
+            let glyph_aspect = (right - left) / (bottom - top);
+
+            for size in SIZES {
+                let rendered = imp::test_icon(icon, size);
+                let pixmap_aspect = rendered.width as f32 / rendered.height as f32;
+                // A pixel of rounding at 16px is ~6%, so the tolerance has to
+                // scale with how coarse the pixmap is.
+                let tolerance = 1.5 / size as f32;
+                assert!(
+                    (pixmap_aspect - glyph_aspect).abs() < tolerance,
+                    "{icon:?} at {size}: pixmap {}x{} is {pixmap_aspect:.3}, glyph is {glyph_aspect:.3}",
+                    rendered.width,
+                    rendered.height
+                );
+            }
         }
     }
 
@@ -650,49 +752,20 @@ mod tests {
         }
     }
 
-    /// The microphone was originally drawn inside its own margin, which made it
-    /// read a size smaller than the other tray items. This pins the fix: each
-    /// glyph has to reach both edges of the pixmap along whichever dimension
-    /// binds -- the microphone is taller than wide and fills the height, the
-    /// lamp is wider than tall and fills the width.
-    #[test]
-    fn every_glyph_fills_its_binding_dimension() {
-        let size = 32usize;
-        for icon in ICONS {
-            let rendered = imp::test_icon(icon, size as u32);
-            let opaque = |x: usize, y: usize| rendered.data[(y * size + x) * 4] > 0;
-
-            let rows: Vec<usize> = (0..size).filter(|&y| (0..size).any(|x| opaque(x, y))).collect();
-            let cols: Vec<usize> = (0..size).filter(|&x| (0..size).any(|y| opaque(x, y))).collect();
-
-            let spans_rows = *rows.first().unwrap() <= 1 && *rows.last().unwrap() >= size - 2;
-            let spans_cols = *cols.first().unwrap() <= 1 && *cols.last().unwrap() >= size - 2;
-
-            assert!(
-                spans_rows || spans_cols,
-                "{icon:?} fills neither dimension: rows {}..{}, cols {}..{} of {size}",
-                rows.first().unwrap(),
-                rows.last().unwrap(),
-                cols.first().unwrap(),
-                cols.last().unwrap()
-            );
-        }
-    }
-
     /// The handle's loop is the lamp's one interior hole, and the feature that
     /// makes it read as a handle rather than a lump. If it filled in, the
     /// drawing would still pass every check above.
     #[test]
     fn the_lamp_handle_is_a_loop() {
-        let size = 48usize;
-        let rendered = imp::test_icon(TrayIcon::Lamp, size as u32);
-        let opaque = |x: usize, y: usize| rendered.data[(y * size + x) * 4] > 128;
+        let rendered = imp::test_icon(TrayIcon::Lamp, 48);
+        let (w, h) = (rendered.width as usize, rendered.height as usize);
+        let opaque = |x: usize, y: usize| rendered.data[(y * w + x) * 4] > 128;
 
         // A row through the handle crosses: body, gap, handle. Scanning every
         // row and taking the best avoids pinning the handle's exact height.
-        let most_crossings = (0..size)
+        let most_crossings = (0..h)
             .map(|y| {
-                let row: Vec<bool> = (0..size).map(|x| opaque(x, y)).collect();
+                let row: Vec<bool> = (0..w).map(|x| opaque(x, y)).collect();
                 row.windows(2).filter(|w| w[0] != w[1]).count()
             })
             .max()
@@ -716,17 +789,16 @@ mod tests {
     #[ignore = "visual aid, not a check"]
     fn show_the_glyphs() {
         for icon in ICONS {
-            for size in [16usize, 22, 32] {
-                println!("\n{icon:?} at {size}px");
-                let rendered = imp::test_icon(icon, size as u32);
-                for y in 0..size {
-                    let row: String = (0..size)
-                        .map(|x| {
-                            match rendered.data[(y * size + x) * 4] {
-                                0..=63 => "  ",
-                                64..=191 => "++",
-                                _ => "##",
-                            }
+            for size in [16u32, 22, 32] {
+                let rendered = imp::test_icon(icon, size);
+                let (w, h) = (rendered.width as usize, rendered.height as usize);
+                println!("\n{icon:?} at {size}px tall -> {w}x{h} pixmap");
+                for y in 0..h {
+                    let row: String = (0..w)
+                        .map(|x| match rendered.data[(y * w + x) * 4] {
+                            0..=63 => "  ",
+                            64..=191 => "++",
+                            _ => "##",
                         })
                         .collect();
                     println!("{row}");
@@ -735,15 +807,49 @@ mod tests {
         }
     }
 
+    /// `tray_red_when_recording = false` has to actually stop the color
+    /// changing, and must leave the idle color alone while doing it. A setting
+    /// that reads fine but does nothing is the failure to guard against here.
+    #[test]
+    fn the_recording_tint_can_be_switched_off() {
+        for color in [TrayColor::White, TrayColor::Black] {
+            let on = TrayStyle {
+                color,
+                red_when_recording: true,
+                ..Default::default()
+            };
+            let off = TrayStyle {
+                red_when_recording: false,
+                ..on
+            };
+
+            assert_ne!(
+                imp::test_ink(on, true),
+                imp::test_ink(on, false),
+                "{color:?}: tint on, but recording draws the idle color"
+            );
+            assert_eq!(
+                imp::test_ink(off, true),
+                imp::test_ink(off, false),
+                "{color:?}: tint off, but recording still changes color"
+            );
+            assert_eq!(
+                imp::test_ink(on, false),
+                imp::test_ink(off, false),
+                "{color:?}: the switch moved the idle color too"
+            );
+        }
+    }
+
     /// Both inks have to differ, and recording has to differ from idle within
     /// each -- otherwise one of the two settings, or the recording state,
     /// silently does nothing.
     #[test]
     fn the_palettes_are_distinguishable() {
-        let (white_idle, white_rec) = imp::test_palette(TrayColour::White);
-        let (black_idle, black_rec) = imp::test_palette(TrayColour::Black);
+        let (white_idle, white_rec) = imp::test_palette(TrayColor::White);
+        let (black_idle, black_rec) = imp::test_palette(TrayColor::Black);
 
-        assert_ne!(white_idle, black_idle, "both inks draw the same colour");
+        assert_ne!(white_idle, black_idle, "both inks draw the same color");
         assert_ne!(white_idle, white_rec, "white: recording looks idle");
         assert_ne!(black_idle, black_rec, "black: recording looks idle");
 

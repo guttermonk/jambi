@@ -80,7 +80,7 @@ stop_wait_ms = 2000
 # package ships (white strokes, reads on a dark panel); an entry naming a file
 # that does not exist falls back to no icon rather than a broken image.
 #
-# On a themed desktop, point this at the recoloured copy your theme generates
+# On a themed desktop, point this at the recolored copy your theme generates
 # and the notification follows your palette:
 #   icon = "/home/you/.icons/microphone.svg"
 # icon = ""
@@ -111,17 +111,27 @@ tray = true
 tray_icon = "microphone"
 
 # The ink the indicator is drawn in. Nothing can reliably read your panel's
-# colour, so this is a setting rather than something detected:
+# color, so this is a setting rather than something detected:
 #
 #   "white" - near-white, for a dark panel (the default)
 #   "black" - near-black, for a light panel
 #
 # "dark" and "light" are accepted as aliases naming the panel instead of the
-# ink, so `tray_colour = "dark"` means the same as "white". Recording stays red
+# ink, so `tray_color = "dark"` means the same as "white". Recording stays red
 # either way -- that reports state, not theme.
 #
-# Try either with `jambi daemon --colour black`.
-tray_colour = "white"
+# Try either with `jambi daemon --color black`.
+tray_color = "white"
+
+# Turn the indicator red while a recording is in progress.
+#
+# On by default, and worth leaving on: it is the only at-a-glance sign that a
+# dictation whose key release never arrived is still holding the microphone.
+# Off keeps the glyph in its usual ink -- the state is still reported, just not
+# in color, since the tooltip and the tray menu both still say "Recording".
+#
+# Try it off with `jambi daemon --no-recording-tint`.
+tray_red_when_recording = true
 
 # Hard cap on a single recording, in seconds. Only reached when the release
 # half of the keybind never arrives -- a dropped `bindr`, or a compositor

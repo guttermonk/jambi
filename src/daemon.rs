@@ -312,7 +312,8 @@ pub async fn run(vosk_config: VoskConfig, daemon_config: DaemonConfig) -> Result
         Tray::spawn(
             TrayStyle {
                 icon: daemon_config.tray_icon,
-                colour: daemon_config.tray_colour,
+                color: daemon_config.tray_color,
+                red_when_recording: daemon_config.tray_red_when_recording,
             },
             TrayState {
                 model: vosk_config.model.to_string(),

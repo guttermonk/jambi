@@ -195,29 +195,40 @@ model and offers **Quit Jambi daemon**. Set `tray = false` under `[daemon]` to
 run without one; on a desktop with no tray at all the daemon just carries on
 and logs that it has no indicator.
 
-Two glyphs and two inks, chosen under `[daemon]`:
+Appearance is chosen under `[daemon]`:
 
 ```toml
 [daemon]
-tray_icon = "microphone"   # or "lamp" -- a genie lamp
-tray_colour = "white"      # or "black"
+tray_icon = "microphone"        # or "lamp" -- a genie lamp
+tray_color = "white"            # or "black" for a light panel
+tray_red_when_recording = true  # false to keep one color throughout
 ```
 
 `tray_icon` picks between the microphone, matching the notification glyph, and
 a genie lamp -- Jambi being a genie. The lamp is drawn solid and unadorned, so
 every pixel goes to the shape itself; being wider than it is tall, it fills the
-width of the icon slot and rather less of the height. `tray_colour` is the ink:
-`white` for a dark panel, `black` for a light one. Nothing can reliably read
-your panel's colour, so it is a setting rather than something detected;
-`"dark"` and `"light"` are accepted as aliases naming the panel instead of the
-ink, so `tray_colour = "dark"` means the same as `"white"`. Recording stays red
-in both, since that reports state rather than following the theme.
+width of the icon slot and rather less of the height.
 
-Both have a flag, so you can see them before committing to a config edit:
+`tray_color` is the ink: `white` for a dark panel, `black` for a light one.
+Nothing can reliably read your panel's color, so it is a setting rather than
+something detected; `"dark"` and `"light"` are accepted as aliases naming the
+panel instead of the ink, so `tray_color = "dark"` means the same as
+`"white"`.
+
+`tray_red_when_recording` is the color change itself. Leaving it on is worth
+it -- the red is the only at-a-glance sign that a dictation whose key release
+never arrived is still holding the microphone -- but if you would rather the
+tray stayed one color, turning it off does not hide the state: the tooltip and
+the tray menu still both say "Recording".
+
+Each has a flag, so you can see the effect before committing to a config edit:
 
 ```bash
-jambi daemon --icon lamp --colour black
+jambi daemon --icon lamp --color black --no-recording-tint
 ```
+
+`--no-recording-tint` only turns the tint off; to force it back on, set the
+config key.
 
 The glyphs are drawn in code rather than shipped as bitmaps, so they stay crisp
 at whatever size your panel asks for instead of being scaled from one image.
@@ -308,7 +319,7 @@ Edit it to change:
 - Sample rate
 - Auto-copy to clipboard
 - Output directory
-- Whether to use the background daemon, and its tray indicator's glyph and colour
+- Whether to use the background daemon, and its tray indicator's glyph and colors
 
 Every key is optional -- a file setting nothing but `mode` is valid, and the
 rest falls back to defaults.
@@ -341,7 +352,8 @@ type_delay_ms = 10       # per-keystroke delay for wtype/xdotool
 enabled = true             # use a running daemon when one is listening
 tray = true                # show a tray indicator while it runs
 tray_icon = "microphone"   # or "lamp"
-tray_colour = "white"      # or "black" for a light panel
+tray_color = "white"       # or "black" for a light panel
+tray_red_when_recording = true  # false to keep one color throughout
 max_recording_secs = 300   # safety cap if a key release is ever missed
 ```
 
@@ -353,8 +365,15 @@ popup rather than stacking: listening, then done, or the specific failure
 left on the clipboard). These matter more than usual in live mode, since it
 runs detached from a keybind and nothing else would surface an error.
 
+"Listening..." stays up for as long as you hold the key, rather than timing
+out part-way through: a recording has no fixed length, and a popup that
+expired early would be saying the dictation had stopped when it had not.
+Whatever ends the recording replaces it. A lost key release is the one case
+nothing replaces it, so it also expires after `daemon.max_recording_secs` --
+the same cap that stops a missed release holding the microphone open.
+
 Notifications carry a microphone glyph, shipped in `assets/` with white
-strokes so it reads on a dark panel. If your desktop recolours its icons,
+strokes so it reads on a dark panel. If your desktop recolors its icons,
 point `dictate.icon` at its copy instead and the notification follows your
 palette:
 ```toml

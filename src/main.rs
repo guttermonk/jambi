@@ -23,7 +23,7 @@ mod tray;
 mod vosk_engine;
 
 use audio::{AudioRecorder, AudioConfig};
-use tray::{TrayColour, TrayIcon};
+use tray::{TrayColor, TrayIcon};
 use vosk_engine::{VoskEngine, VoskConfig, VoskModel};
 // Whisper imports removed - using Vosk instead
 
@@ -142,10 +142,16 @@ enum Commands {
         #[arg(long, value_enum)]
         icon: Option<TrayIcon>,
 
-        /// Tray ink, overriding `daemon.tray_colour`. `white` suits a dark
+        /// Tray ink, overriding `daemon.tray_color`. `white` suits a dark
         /// panel, `black` a light one
         #[arg(long, value_enum)]
-        colour: Option<TrayColour>,
+        color: Option<TrayColor>,
+
+        /// Leave the tray glyph in its usual ink while recording, overriding
+        /// `daemon.tray_red_when_recording`. Only turns the tint off -- to
+        /// force it on, set the config key
+        #[arg(long)]
+        no_recording_tint: bool,
     },
 
     /// Print the active mode and exit
@@ -216,7 +222,7 @@ pub struct DictateConfig {
     /// JAMBI_ICON (the glyph the package ships) when unset, and to no icon at
     /// all when neither names a file that exists.
     ///
-    /// Worth setting on a themed desktop: point it at the recoloured copy the
+    /// Worth setting on a themed desktop: point it at the recolored copy the
     /// theme generates and the notification follows the palette instead of
     /// staying the shipped white.
     #[serde(default)]
@@ -240,8 +246,12 @@ fn default_stop_wait_ms() -> u64 {
 /// See `daemon.rs` for what it does. These control how the *front-ends* treat
 /// it as much as the daemon itself, since every command tries the socket and
 /// falls back to loading its own model.
+/// `deny_unknown_fields` so a key that is misspelt, or left over from a
+/// rename, is an error naming the offender rather than a setting that silently
+/// does nothing. Serde ignores unknown fields otherwise, which for appearance
+/// settings is indistinguishable from the feature being broken.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DaemonConfig {
     /// Hand work to a running daemon when one is listening. Turning this off
     /// makes every invocation load its own model again, which is the pre-daemon
@@ -257,9 +267,17 @@ pub struct DaemonConfig {
     pub tray_icon: TrayIcon,
 
     /// The ink the indicator is drawn in: `white` for a dark panel, `black`
-    /// for a light one. There is no reliable way to read the panel's colour,
+    /// for a light one. There is no reliable way to read the panel's color,
     /// so this is a setting rather than something detected.
-    pub tray_colour: TrayColour,
+    pub tray_color: TrayColor,
+
+    /// Turn the indicator red while a recording is in progress.
+    ///
+    /// On by default, because it is the only at-a-glance sign that a dictation
+    /// whose key release went missing is still holding the microphone. Off
+    /// leaves the glyph in its usual ink; the tooltip and menu still report
+    /// the state.
+    pub tray_red_when_recording: bool,
 
     /// Hard cap on a single recording, in seconds.
     ///
@@ -275,7 +293,8 @@ impl Default for DaemonConfig {
             enabled: true,
             tray: true,
             tray_icon: TrayIcon::default(),
-            tray_colour: TrayColour::default(),
+            tray_color: TrayColor::default(),
+            tray_red_when_recording: true,
             max_recording_secs: 300,
         }
     }
@@ -384,18 +403,26 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Some(Commands::Daemon { action, icon, colour }) => {
+        Some(Commands::Daemon {
+            action,
+            icon,
+            color,
+            no_recording_tint,
+        }) => {
             let mut vosk_config = vosk_config;
             vosk_config.verbose = cli.verbose;
 
-            // Flags win over the config file, so both glyphs and both inks can
-            // be tried without editing anything.
+            // Flags win over the config file, so every appearance can be tried
+            // without editing anything.
             let mut daemon_config = config.daemon;
             if let Some(icon) = icon {
                 daemon_config.tray_icon = icon;
             }
-            if let Some(colour) = colour {
-                daemon_config.tray_colour = colour;
+            if let Some(color) = color {
+                daemon_config.tray_color = color;
+            }
+            if no_recording_tint {
+                daemon_config.tray_red_when_recording = false;
             }
 
             match action.unwrap_or(DaemonAction::Run) {

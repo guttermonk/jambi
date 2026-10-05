@@ -100,17 +100,21 @@ pub async fn start(
         match client.request(&Request::Start).await {
             Ok(Reply::Started) => {
                 debug!("daemon is recording");
-                notify(&dictate_config, "🎤 Listening...");
+                notify(
+                    &dictate_config,
+                    "🎤 Listening...",
+                    Expiry::while_recording(Some(daemon_config.max_recording_secs)),
+                );
                 return Ok(());
             }
             Ok(Reply::AlreadyRecording) => {
                 warn!("the daemon is already recording");
-                notify(&dictate_config, "⚠️ Already recording");
+                notify(&dictate_config, "⚠️ Already recording", Expiry::BRIEF);
                 return Ok(());
             }
             Ok(Reply::Error { message }) => {
                 error!("daemon refused to start recording: {}", message);
-                notify(&dictate_config, "❌ Recording failed - check the microphone");
+                notify(&dictate_config, "❌ Recording failed - check the microphone", Expiry::BRIEF);
                 return Err(anyhow::anyhow!(message));
             }
             Ok(other) => {
@@ -133,7 +137,7 @@ pub async fn start(
         // second tap while the first recording is still open would otherwise
         // stack recorders onto the same microphone.
         warn!("dictation already running as pid {}", existing);
-        notify(&dictate_config, "⚠️ Already recording");
+        notify(&dictate_config, "⚠️ Already recording", Expiry::BRIEF);
         return Ok(());
     }
 
@@ -160,7 +164,11 @@ pub async fn start(
     // and clip the first word.
     let mut engine = VoskEngine::new(vosk_config)?;
 
-    notify(&dictate_config, "🎤 Listening...");
+    notify(
+        &dictate_config,
+        "🎤 Listening...",
+        Expiry::while_recording(None),
+    );
 
     let stop = async move {
         tokio::select! {
@@ -182,14 +190,14 @@ pub async fn start(
         Ok(result) => result,
         Err(e) => {
             error!("dictation failed: {:#}", e);
-            notify(&dictate_config, "❌ Recording failed - check the microphone");
+            notify(&dictate_config, "❌ Recording failed - check the microphone", Expiry::BRIEF);
             return Err(e);
         }
     };
 
     if result.text.is_empty() {
         info!("no speech recognised");
-        notify(&dictate_config, "❌ No speech detected");
+        notify(&dictate_config, "❌ No speech detected", Expiry::BRIEF);
         return Ok(());
     }
 
@@ -255,7 +263,7 @@ pub async fn stop(
                 Ok(Collected::Elsewhere) => return Ok(()),
                 Ok(Collected::Failed(message)) => {
                     error!("dictation failed: {}", message);
-                    notify(dictate_config, "❌ Recording failed - check the microphone");
+                    notify(dictate_config, "❌ Recording failed - check the microphone", Expiry::BRIEF);
                     return Err(anyhow::anyhow!(message));
                 }
                 Ok(Collected::Pending) => client = Some(connected),
@@ -274,7 +282,7 @@ pub async fn stop(
             // this states the outcome instead of arguing about the premise;
             // the recorder itself notifies the specific failure.
             warn!("no dictation in progress after {:?}", deadline);
-            notify(dictate_config, "⏹️ Recording already stopped");
+            notify(dictate_config, "⏹️ Recording already stopped", Expiry::BRIEF);
             return Ok(());
         }
 
@@ -329,7 +337,7 @@ async fn collect_from_daemon(client: &mut Client) -> Result<Collected> {
 async fn finish(text: String, config: &DictateConfig, auto_copy: bool) -> Result<()> {
     if text.is_empty() {
         info!("no speech recognised");
-        notify(config, "❌ No speech detected");
+        notify(config, "❌ No speech detected", Expiry::BRIEF);
         return Ok(());
     }
 
@@ -355,7 +363,40 @@ fn icon(config: &DictateConfig) -> Option<String> {
         })
 }
 
-fn notify(config: &DictateConfig, body: &str) {
+/// How long a popup stays on screen, in milliseconds.
+///
+/// Zero is "until something replaces it" to a notification daemon that follows
+/// the specification.
+#[derive(Debug, Clone, Copy)]
+struct Expiry(u64);
+
+impl Expiry {
+    /// For anything reporting an operation that has already finished.
+    const BRIEF: Self = Self(2000);
+
+    /// For "Listening...", which has to last as long as the key is held.
+    ///
+    /// A recording has no fixed length, so any timeout is a guess -- and the
+    /// guess that expires early claims the dictation stopped when it had not,
+    /// which is the worst thing this particular popup can say, since the
+    /// reason to look at it is to know whether you are still being heard.
+    /// Every path out of a recording notifies, and all of them carry the
+    /// replacement hint below, so this is superseded rather than left behind.
+    ///
+    /// `cap` bounds it, so that a lost key release cannot leave the popup
+    /// insisting it is listening long after the tray has gone back to idle.
+    /// It is `daemon.max_recording_secs` as this process reads it, which is
+    /// the daemon's own cap whenever both are reading one config file -- and
+    /// only a bound on a popup either way, so a daemon started against some
+    /// other config costs nothing worse than a stale notification. The
+    /// in-process recorder has no cap at all, running until signalled, and
+    /// passes `None`.
+    fn while_recording(cap: Option<u64>) -> Self {
+        Self(cap.map_or(0, |secs| secs.saturating_mul(1000)))
+    }
+}
+
+fn notify(config: &DictateConfig, body: &str, expiry: Expiry) {
     let mut args: Vec<String> = Vec::new();
 
     if let Some(path) = icon(config) {
@@ -365,10 +406,11 @@ fn notify(config: &DictateConfig, body: &str) {
 
     // Replace the previous popup instead of stacking: a dictation cycle emits
     // several of these in a row and they describe one operation, not many.
+    // This is also what retires a `UntilReplaced` popup.
     args.push("-h".into());
     args.push("string:x-canonical-private-synchronous:jambi".into());
     args.push("-t".into());
-    args.push("2000".into());
+    args.push(expiry.0.to_string());
     args.push("Jambi".into());
     args.push(body.into());
 
@@ -404,13 +446,13 @@ async fn deliver(text: &str, config: &DictateConfig, auto_copy: bool) {
     }
 
     match type_text(text, config).await {
-        Ok(()) => notify(config, "✅ Done"),
+        Ok(()) => notify(config, "✅ Done", Expiry::BRIEF),
         Err(e) => {
             warn!("failed to type text: {}", e);
             if copied {
-                notify(config, "📋 Copied to clipboard (typing failed)");
+                notify(config, "📋 Copied to clipboard (typing failed)", Expiry::BRIEF);
             } else {
-                notify(config, "❌ Could not deliver text");
+                notify(config, "❌ Could not deliver text", Expiry::BRIEF);
             }
         }
     }
