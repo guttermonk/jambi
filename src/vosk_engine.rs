@@ -515,6 +515,21 @@ impl VoskEngine {
         self.model.clone()
     }
 
+    /// Switch to a different model. The next `load_model` fetches and loads it.
+    ///
+    /// Clears the resolved path as well as the loaded model, which is the
+    /// whole point: leaving the path behind is what made switching language
+    /// reload the previous model while announcing the new one.
+    pub fn set_model(&mut self, model: VoskModel) {
+        if self.config.model == model {
+            return;
+        }
+
+        self.config.model = model;
+        self.model = None;
+        self.model_path = None;
+    }
+
     /// Get the models directory
     fn get_models_dir() -> Result<PathBuf> {
         let cache_dir = dirs::cache_dir()
@@ -674,12 +689,31 @@ impl VoskEngine {
         // Suppress Vosk's internal debug messages
         // Use Error level to only show errors, suppressing debug/info/warning messages
         vosk::set_log_level(vosk::LogLevel::Error);
-        
+
+        // A path left over from a *different* model has to be discarded, not
+        // reused. Skipping the download check whenever any path was set is
+        // what made switching language silently reload the previous model and
+        // then report the new one as loaded -- German selected, English
+        // transcribed. Both fields are public, so this is checked here rather
+        // than trusting every caller to keep them in step.
+        let stale = self.model_path.as_ref().is_some_and(|path| {
+            path.file_name().and_then(|name| name.to_str()) != Some(self.config.model.model_name())
+        });
+        if stale {
+            debug!(
+                "discarding model path {:?}, which is not {}",
+                self.model_path,
+                self.config.model.model_name()
+            );
+            self.model_path = None;
+            self.model = None;
+        }
+
         // Download model if needed
         if self.model_path.is_none() {
             self.download_model().await?;
         }
-        
+
         let model_path = self.model_path.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Model path not set"))?;
         
@@ -1107,6 +1141,52 @@ mod tests {
         let config = VoskConfig::default();
         let engine = VoskEngine::new(config);
         assert!(engine.is_ok());
+    }
+
+    /// Switching model has to drop the resolved path, not just the loaded
+    /// model. Keeping it is what made a German or French selection reload the
+    /// English model and report the new one as active -- the transcript came
+    /// back in English and nothing said why.
+    #[test]
+    fn switching_model_drops_the_old_path() {
+        let mut engine = VoskEngine::new(VoskConfig::default()).unwrap();
+        assert_eq!(engine.config.model, VoskModel::SmallEnUs);
+
+        // As it would be after the first load.
+        engine.model_path = Some(PathBuf::from("/cache/vosk-model-small-en-us-0.15"));
+
+        engine.set_model(VoskModel::SmallDe);
+
+        assert_eq!(engine.config.model, VoskModel::SmallDe);
+        assert!(
+            engine.model_path.is_none(),
+            "kept the old path {:?}, so the next load reuses the English model",
+            engine.model_path
+        );
+    }
+
+    /// The same hazard defended at the point of use, because both fields are
+    /// public and any caller can set them out of step.
+    #[tokio::test]
+    async fn loading_discards_a_path_belonging_to_another_model() {
+        let mut engine = VoskEngine::new(VoskConfig {
+            model: VoskModel::SmallDe,
+            ..VoskConfig::default()
+        })
+        .unwrap();
+
+        // A path for a different model than the config asks for.
+        engine.model_path = Some(PathBuf::from("/cache/vosk-model-small-en-us-0.15"));
+
+        // Fails -- nothing is downloadable here -- but it must fail having
+        // discarded the mismatched path rather than loading English from it.
+        let _ = engine.load_model().await;
+
+        let used = engine.model_path.as_ref().map(|p| p.display().to_string());
+        assert!(
+            !used.as_deref().is_some_and(|p| p.contains("en-us")),
+            "still pointing at the English model: {used:?}"
+        );
     }
 
     /// Write a WAV of `channels` channels at `rate`, for the reader tests.

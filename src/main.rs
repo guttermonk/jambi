@@ -661,10 +661,7 @@ impl Engine {
                 }
             }
             Self::Local(engine) => {
-                let mut config = engine.config.clone();
-                config.model = model;
-                engine.config = config;
-                engine.model = None; // force a reload against the new model
+                engine.set_model(model);
                 engine.load_model().await
             }
         }
