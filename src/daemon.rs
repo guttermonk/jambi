@@ -278,10 +278,28 @@ pub async fn run(vosk_config: VoskConfig, daemon_config: DaemonConfig) -> Result
             .with_context(|| format!("failed to remove stale socket {}", path.display()))?;
     }
 
-    // The model is loaded before the socket is bound, so a client that can
-    // connect is a client that can be served immediately. Binding first would
-    // make the first press after login wait out the load anyway, with no sign
-    // that it was doing so.
+    // Bound before the model is loaded, and the order is the whole point.
+    //
+    // The socket is how a front-end decides whether a daemon exists at all. If
+    // it appeared only once the model was in memory, then every press during
+    // that second-or-so would find nothing listening, fall back to its own
+    // in-process engine, and load a *second* copy of the same model alongside
+    // the one the daemon was already loading -- two 40MB loads competing for
+    // the same couple of cores, each making the other slower. That is a
+    // pathology, not a fallback, and it is exactly what someone sees when they
+    // start the daemon and immediately try it.
+    //
+    // Binding first closes the window. A press that lands mid-load sits in the
+    // listen backlog and is served the moment the accept loop starts, which
+    // costs it the remainder of the load but never a redundant one. If loading
+    // fails the guard below removes the socket and those clients are
+    // disconnected, which is the signal to fall back in-process -- so the
+    // escape hatch survives for the case that actually warrants it.
+    let listener = UnixListener::bind(&path)
+        .with_context(|| format!("failed to bind {}", path.display()))?;
+    let _guard = SocketGuard(path.clone());
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+
     info!("loading model {}...", vosk_config.model);
     let load_started = Instant::now();
     let mut engine = VoskEngine::new(vosk_config.clone())?;
@@ -297,11 +315,6 @@ pub async fn run(vosk_config: VoskConfig, daemon_config: DaemonConfig) -> Result
         vosk_config.model,
         load_started.elapsed().as_millis()
     );
-
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("failed to bind {}", path.display()))?;
-    let _guard = SocketGuard(path.clone());
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
 
     let shutdown = Arc::new(Notify::new());
 
