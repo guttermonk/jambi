@@ -210,34 +210,172 @@ struct Pcm {
     sample_rate: f32,
 }
 
-/// Read a WAV file into mono samples at its own rate.
-fn read_wav(path: &Path) -> Result<Pcm> {
-    use hound::{SampleFormat, WavReader};
+/// Read an audio file into mono samples at its own rate.
+///
+/// WAV goes through hound, which has read it correctly for as long as jambi
+/// has existed and costs nothing; everything else goes to symphonia. Splitting
+/// on the format rather than handing both to symphonia keeps the common case
+/// on the path that is already proven, and keeps a build without the `formats`
+/// feature working rather than losing file transcription altogether.
+fn read_audio(path: &Path) -> Result<Pcm> {
     use std::fs::File;
-    use std::io::{BufReader, Read, Seek};
+    use std::io::Read;
 
     let mut file = File::open(path)
         .with_context(|| format!("cannot open {}", path.display()))?;
 
-    // Sniffed before handing the file to hound, whose complaint for anything
-    // else is "Ill-formed WAVE file: no RIFF tag found" -- true, but it never
-    // occurs to someone holding an .m4a that WAV was ever the requirement.
     let mut header = [0u8; 12];
     let read = file.read(&mut header)?;
     let header = &header[..read];
-    if !(starts_with(header, 0, b"RIFF") && starts_with(header, 8, b"WAVE")) {
-        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        anyhow::bail!(
-            "{} is {}, and jambi reads WAV.\n\
-             Convert it first, to mono at the rate the model wants:\n    \
-             ffmpeg -i {} -ar 16000 -ac 1 {}.wav",
-            path.display(),
-            describe_format(header),
-            path.display(),
-            stem,
-        );
+
+    if starts_with(header, 0, b"RIFF") && starts_with(header, 8, b"WAVE") {
+        return read_wav(path);
     }
-    file.rewind()?;
+
+    decode_other(path, header)
+}
+
+/// Everything that is not a WAV.
+#[cfg(feature = "formats")]
+fn decode_other(path: &Path, header: &[u8]) -> Result<Pcm> {
+    decode_with_symphonia(path).with_context(|| {
+        format!("cannot decode {} ({})", path.display(), describe_format(header))
+    })
+}
+
+/// Without the `formats` feature there is no decoder, so say which format was
+/// refused and how to turn it into one jambi can read. Built this way on
+/// purpose: a minimal build should explain itself, not simply fail.
+#[cfg(not(feature = "formats"))]
+fn decode_other(path: &Path, header: &[u8]) -> Result<Pcm> {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    anyhow::bail!(
+        "{} is {}, and this build of jambi reads only WAV.\n\
+         Convert it first, to mono at the rate the model wants:\n    \
+         ffmpeg -i {} -ar 16000 -ac 1 {}.wav",
+        path.display(),
+        describe_format(header),
+        path.display(),
+        stem,
+    );
+}
+
+/// Decode anything symphonia understands: m4a, mp3, flac, ogg, opus, aiff, caf.
+///
+/// No resampling happens here. Vosk takes the rate it is given and resamples
+/// to the model's own, so the decoder's only jobs are to produce i16 and to
+/// report the rate honestly.
+#[cfg(feature = "formats")]
+fn decode_with_symphonia(path: &Path) -> Result<Pcm> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+    use symphonia::core::errors::Error as SymphoniaError;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+
+    // The extension is a hint only -- symphonia probes the bytes regardless,
+    // so a mislabelled file still decodes.
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(extension);
+    }
+
+    let probed = symphonia::default::get_probe().format(
+        &hint,
+        stream,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    )?;
+    let mut format = probed.format;
+
+    let track = format
+        .tracks()
+        .iter()
+        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| anyhow::anyhow!("no audio track"))?;
+    let track_id = track.id;
+    let mut decoder =
+        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
+
+    let mut interleaved: Vec<i16> = Vec::new();
+    let mut buffer: Option<SampleBuffer<i16>> = None;
+    let mut channels = 0u16;
+    let mut sample_rate = 0u32;
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            // How symphonia reports a clean end of stream.
+            Err(SymphoniaError::IoError(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        match decoder.decode(&packet) {
+            Ok(decoded) => {
+                let spec = *decoded.spec();
+                channels = spec.channels.count() as u16;
+                sample_rate = spec.rate;
+
+                let buffer = buffer.get_or_insert_with(|| {
+                    SampleBuffer::<i16>::new(decoded.capacity() as u64, spec)
+                });
+                buffer.copy_interleaved_ref(decoded);
+                interleaved.extend_from_slice(buffer.samples());
+            }
+            // Both are documented as recoverable: skip the packet, keep going.
+            // Bailing here would throw away an otherwise good recording over
+            // one corrupt frame.
+            Err(SymphoniaError::DecodeError(e)) => debug!("skipping packet: {}", e),
+            Err(SymphoniaError::ResetRequired) => {
+                debug!("decoder reset requested, stopping at this point");
+                break;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    if interleaved.is_empty() || sample_rate == 0 {
+        anyhow::bail!("decoded no audio");
+    }
+
+    let samples = downmix(interleaved, channels);
+
+    debug!(
+        "{}: {}Hz, {} channel(s) -> {} mono samples",
+        path.display(),
+        sample_rate,
+        channels,
+        samples.len()
+    );
+
+    Ok(Pcm {
+        samples,
+        sample_rate: sample_rate as f32,
+    })
+}
+
+/// Read a WAV file into mono samples at its own rate.
+fn read_wav(path: &Path) -> Result<Pcm> {
+    use hound::{SampleFormat, WavReader};
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let file = File::open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
 
     let mut wav = WavReader::new(BufReader::new(file))
         .with_context(|| format!("cannot read {} as WAV", path.display()))?;
@@ -714,7 +852,7 @@ impl VoskEngine {
     /// Read an audio file into mono samples at the file's own rate.
     async fn read_audio_file(&self, audio_path: &Path) -> Result<Pcm> {
         let file_path = audio_path.to_path_buf();
-        tokio::task::spawn_blocking(move || read_wav(&file_path)).await?
+        tokio::task::spawn_blocking(move || read_audio(&file_path)).await?
     }
     
     /// Get available models
@@ -999,7 +1137,7 @@ mod tests {
             let path = dir.path().join(format!("{rate}.wav"));
             write_wav(&path, rate, 1, &[0, 1000, -1000, 0]);
 
-            let pcm = read_wav(&path).unwrap();
+            let pcm = read_audio(&path).unwrap();
             assert_eq!(
                 pcm.sample_rate, rate as f32,
                 "{rate}Hz file reported {}Hz",
@@ -1019,7 +1157,7 @@ mod tests {
             let path = dir.path().join(format!("{channels}ch.wav"));
             write_wav(&path, 16_000, channels, &frames);
 
-            let pcm = read_wav(&path).unwrap();
+            let pcm = read_audio(&path).unwrap();
             assert_eq!(
                 pcm.samples.len(),
                 frames.len(),
@@ -1037,23 +1175,76 @@ mod tests {
         assert_eq!(downmix(vec![1, 2, 3], 1), vec![1, 2, 3]);
     }
 
-    /// The reported bug: an .m4a produced "Ill-formed WAVE file: no RIFF tag
-    /// found", which is true and useless. The error has to name the format and
-    /// say what to do.
+    /// Something that is not audio at all still has to fail by name rather
+    /// than leaking hound's "no RIFF tag found", which is the wording the
+    /// original report was about.
     #[test]
-    fn a_non_wav_file_is_reported_by_name() {
+    fn a_file_that_is_not_audio_is_reported_by_name() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("voice.m4a");
-        // The ftyp box an MPEG-4 file opens with.
-        std::fs::write(&path, b"\0\0\0\x20ftypM4A \0\0\0\0M4A mp42isom").unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, b"this is not audio, it is prose").unwrap();
 
-        let error = read_wav(&path).unwrap_err().to_string();
-        assert!(error.contains("MPEG-4"), "did not name the format: {error}");
-        assert!(error.contains("ffmpeg"), "did not say how to convert: {error}");
+        let error = format!("{:#}", read_audio(&path).unwrap_err());
         assert!(
             !error.contains("RIFF tag"),
             "still leaks hound's wording: {error}"
         );
+        assert!(
+            error.contains("notes.txt"),
+            "did not name the file: {error}"
+        );
+    }
+
+    /// The formats the issue was actually about. Fixtures are half a second of
+    /// 440Hz at 22050Hz stereo, so a decode that silently produced nothing, or
+    /// quietly used the config's 16000Hz, is caught by the assertions rather
+    /// than by someone reading a wrong transcript.
+    #[cfg(feature = "formats")]
+    #[test]
+    fn encoded_formats_decode_to_mono_at_their_own_rate() {
+        for (name, bytes) in [
+            ("tone.m4a", &include_bytes!("../tests/fixtures/tone.m4a")[..]),
+            ("tone.mp3", &include_bytes!("../tests/fixtures/tone.mp3")[..]),
+            ("tone.flac", &include_bytes!("../tests/fixtures/tone.flac")[..]),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+
+            let pcm = read_audio(&path)
+                .unwrap_or_else(|e| panic!("{name} failed to decode: {e:#}"));
+
+            assert_eq!(
+                pcm.sample_rate, 22_050.0,
+                "{name} reported {}Hz, not the file's own rate",
+                pcm.sample_rate
+            );
+            // Half a second at 22050Hz, mono. Lossy codecs pad, so this is a
+            // range: what matters is that it is one channel's worth, not two.
+            assert!(
+                (8_000..18_000).contains(&pcm.samples.len()),
+                "{name} decoded {} samples, expected roughly 11025 mono",
+                pcm.samples.len()
+            );
+            assert!(
+                pcm.samples.iter().any(|&s| s.abs() > 1000),
+                "{name} decoded silence"
+            );
+        }
+    }
+
+    /// Without the feature there is no decoder, and the error has to say so
+    /// and name the format rather than failing obscurely.
+    #[cfg(not(feature = "formats"))]
+    #[test]
+    fn without_the_formats_feature_the_error_explains_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.m4a");
+        std::fs::write(&path, b"\0\0\0\x20ftypM4A \0\0\0\0M4A mp42isom").unwrap();
+
+        let error = format!("{:#}", read_audio(&path).unwrap_err());
+        assert!(error.contains("MPEG-4"), "did not name the format: {error}");
+        assert!(error.contains("ffmpeg"), "did not say how to convert: {error}");
     }
 
     #[test]

@@ -273,7 +273,17 @@ recording in PipeWire and holding the device against everything else.
 Transcribe an existing audio file:
 ```bash
 ./jambi transcribe audio.wav
+./jambi transcribe voice-memo.m4a
 ```
+
+WAV, m4a/aac, mp3, FLAC, Ogg, Opus, AIFF and CAF are read directly -- a phone's
+voice memo is an m4a, so it decodes without you converting anything first. The
+decoder is compiled in (pure Rust, no ffmpeg on PATH required), and the file's
+own sample rate and channel count are honoured rather than assumed.
+
+Anything still unsupported says so by name, with the command to convert it.
+Builds made with `--no-default-features` drop the decoder and read WAV only,
+with the same explanatory error.
 
 #### List Available Models
 See all available language models:

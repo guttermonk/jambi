@@ -60,6 +60,11 @@ Thumbs.db
 *.flac
 *.ogg
 
+# ...except the decoder's test fixtures, which have to be real encoded files
+# and are a few KB each. Without these the tests do not compile: they are
+# pulled in with include_bytes!.
+!tests/fixtures/**
+
 # Cache and temporary files
 .cache/
 *.tmp

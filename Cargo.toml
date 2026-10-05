@@ -58,6 +58,21 @@ nix = { version = "0.30.1", features = ["signal"] }
 # and nothing extra for the Nix build to find on the host.
 ksni = { version = "0.3.6", default-features = false, features = ["tokio"], optional = true }
 
+# Decoding for audio files that are not WAV. Pure Rust, so it compiles in
+# rather than becoming a runtime dependency on ffmpeg -- which would be a
+# ~100MB closure next to a 40MB model, and would put jambi back in the
+# position of only working if the host happens to have the right tool built
+# the right way.
+#
+# 0.5 rather than 0.6: same decoders, but an MSRV of 1.53 against 0.6's 1.85,
+# which keeps the "Rust 1.70+" in the README true.
+#
+# Only the formats worth carrying. `isomp4`/`aac`/`alac` are the point of the
+# exercise -- phones record m4a -- and the rest come close to free.
+symphonia = { version = "0.5.4", optional = true, features = [
+    "isomp4", "aac", "alac", "mpa", "aiff", "caf",
+] }
+
 [dev-dependencies]
 # For tests
 tempfile = "3.8"
@@ -80,8 +95,14 @@ opt-level = 0
 
 # Feature flags
 [features]
-default = ["cli", "tray"]
+default = ["cli", "tray", "formats"]
 cli = ["dep:clap"]
+# Decode audio files that are not WAV: m4a, mp3, flac, ogg, opus, aiff, caf.
+# On by default, because a phone's voice memo is an m4a and telling someone to
+# go and convert it first is the barrier this removes. Turning it off leaves
+# the WAV reader and an error naming the format and the ffmpeg line to fix it,
+# so a minimal build degrades to saying what it cannot do.
+formats = ["dep:symphonia"]
 # Tray indicator for `jambi daemon`. On by default because a daemon you cannot
 # see is a daemon you cannot tell is running; turn it off for a headless build,
 # or leave it on and set `tray = false` under [daemon] to decide at runtime.
