@@ -199,15 +199,15 @@ Appearance is chosen under `[daemon]`:
 
 ```toml
 [daemon]
-tray_icon = "microphone"        # or "lamp" -- a genie lamp
+tray_icon = "lamp"              # or "microphone"
 tray_color = "white"            # or "black" for a light panel
 tray_red_when_recording = true  # false to keep one color throughout
 ```
 
-`tray_icon` picks between the microphone, matching the notification glyph, and
-a genie lamp -- Jambi being a genie. The lamp is drawn solid and unadorned, so
-every pixel goes to the shape itself; being wider than it is tall, it fills the
-width of the icon slot and rather less of the height.
+`tray_icon` picks between a genie lamp -- Jambi being a genie, and the default
+-- and the microphone, matching the notification glyph. The lamp is drawn solid
+and unadorned, so every pixel goes to the shape itself; being wider than it is
+tall, it fills the width of the icon slot and rather less of the height.
 
 `tray_color` is the ink: `white` for a dark panel, `black` for a light one.
 Nothing can reliably read your panel's color, so it is a setting rather than
@@ -224,7 +224,7 @@ the tray menu still both say "Recording".
 Each has a flag, so you can see the effect before committing to a config edit:
 
 ```bash
-jambi daemon --icon lamp --color black --no-recording-tint
+jambi daemon --icon microphone --color black --no-recording-tint
 ```
 
 `--no-recording-tint` only turns the tint off; to force it back on, set the
@@ -351,7 +351,7 @@ type_delay_ms = 10       # per-keystroke delay for wtype/xdotool
 [daemon]                   # see Background Daemon above
 enabled = true             # use a running daemon when one is listening
 tray = true                # show a tray indicator while it runs
-tray_icon = "microphone"   # or "lamp"
+tray_icon = "lamp"         # or "microphone"
 tray_color = "white"       # or "black" for a light panel
 tray_red_when_recording = true  # false to keep one color throughout
 max_recording_secs = 300   # safety cap if a key release is ever missed

@@ -238,6 +238,20 @@ pub async fn stop(
         return Ok(());
     }
 
+    // The key is up, so stop claiming to be listening -- immediately, before
+    // any of the work below. This process is the only one that knows the
+    // release happened: the in-process recorder learns it from a signal, and
+    // the daemon not until its reply is already being written, by which point
+    // the recognising is done. Waiting for either would leave "Listening..."
+    // up through the flush, the modifier grace and the typing, which is most
+    // of the gap the user actually sees.
+    //
+    // Emitted before knowing whether anything is recording at all. A `stop`
+    // with no press behind it therefore flashes this before correcting itself
+    // to "Recording already stopped" -- the rarer case, and the one where
+    // being briefly wrong costs least.
+    notify(dictate_config, "🧠 Transcribing...", Expiry::WHILE_DELIVERING);
+
     // The press half has to register itself before this can find it, and on a
     // quick tap the release arrives first. Poll briefly rather than reporting
     // "nothing recording" for what is really a race the user cannot see.
@@ -394,6 +408,16 @@ impl Expiry {
     fn while_recording(cap: Option<u64>) -> Self {
         Self(cap.map_or(0, |secs| secs.saturating_mul(1000)))
     }
+
+    /// For "Transcribing...", which covers everything between the key coming
+    /// up and the text landing: the recogniser's final flush, the modifier
+    /// grace period, and the typing itself -- which at `type_delay_ms` per
+    /// character is the long pole for a long dictation.
+    ///
+    /// Generous rather than fitted. It only has to outlast delivery, and
+    /// delivery replaces it the moment it ends; the bound exists so that a
+    /// `stop` killed mid-typing cannot leave the popup up for the session.
+    const WHILE_DELIVERING: Self = Self(60_000);
 }
 
 fn notify(config: &DictateConfig, body: &str, expiry: Expiry) {

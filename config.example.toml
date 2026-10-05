@@ -104,11 +104,11 @@ tray = true
 
 # Which glyph the indicator draws:
 #
-#   "microphone" - the same shape the notifications use (the default)
-#   "lamp"       - a genie lamp, Jambi being a genie
+#   "lamp"       - a genie lamp, Jambi being a genie (the default)
+#   "microphone" - the same shape the notifications use
 #
-# Try either without editing this file: `jambi daemon --icon lamp`.
-tray_icon = "microphone"
+# Try either without editing this file: `jambi daemon --icon microphone`.
+tray_icon = "lamp"
 
 # The ink the indicator is drawn in. Nothing can reliably read your panel's
 # color, so this is a setting rather than something detected:

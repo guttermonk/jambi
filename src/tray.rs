@@ -26,13 +26,13 @@ use tracing::debug;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum TrayIcon {
-    /// The microphone, matching the glyph on notifications.
-    #[default]
-    Microphone,
     /// A genie lamp, Jambi being a genie. Drawn solid and unadorned: it is
     /// wider than it is tall, so it fills the width of the panel's icon slot
     /// and rather less of the height.
+    #[default]
     Lamp,
+    /// The microphone, matching the glyph on notifications.
+    Microphone,
 }
 
 /// The color the glyph is drawn in.
@@ -400,12 +400,31 @@ mod imp {
     const LAMP_RIGHT: f32 = 0.877;
     const LAMP_BOTTOM: f32 = 0.745;
 
-    /// Fraction of the pixmap the glyph fills, in both directions.
+    /// Blank margin above and below the glyph, as a fraction of its longer
+    /// side.
     ///
-    /// Short of 1.0 only so the antialiased edge has somewhere to land rather
-    /// than being clipped flat against the border. Everything else is cropping
-    /// rather than margin -- see `render`.
-    const GLYPH_FILL: f32 = 0.96;
+    /// This is the knob for apparent size, and only this one. A host scales
+    /// the pixmap so its height matches the panel's icon height, so the glyph
+    /// ends up drawn at `height / (height + 2 * margin)` of its neighbours --
+    /// a bigger margin means a smaller glyph. Flush to the glyph drew the lamp
+    /// noticeably larger than everything else on the bar, and padding out to a
+    /// square drew it noticeably smaller; this sits between the two.
+    ///
+    /// Measured against the longer side so the border reads as the same
+    /// thickness as the horizontal one below, rather than being stretched
+    /// along whichever axis is shorter.
+    pub(super) const GLYPH_MARGIN_Y: f32 = 0.09;
+
+    /// Blank margin to left and right of the glyph, in pixels.
+    ///
+    /// Deliberately not tied to the vertical margin, because the two do
+    /// entirely different jobs: height drives the scale, so vertical padding
+    /// resizes the glyph, while horizontal padding cannot -- a host lays the
+    /// item out at the pixmap's own width, so every blank column is just a gap
+    /// on the bar. One pixel is enough for the antialiased edge to land in and
+    /// no more, because anything wider shows up as this icon sitting further
+    /// from its neighbour than they sit from each other.
+    pub(super) const GLYPH_MARGIN_X_PX: f32 = 1.0;
 
     /// Draw `icon` at `height` pixels tall, in `color`.
     ///
@@ -429,11 +448,14 @@ mod imp {
         /// this thick, and keeps a 16px icon at 2,304 distance evaluations.
         const SAMPLES: u32 = 3;
 
-        // One scale for both axes, derived from the height, with the width
-        // following the glyph's aspect. Deriving each axis from its own extent
-        // would let rounding stretch the drawing.
-        let units_per_px = shape.height() / GLYPH_FILL / height as f32;
-        let width = ((shape.width() / GLYPH_FILL) / units_per_px).round().max(1.0) as u32;
+        // One scale for both axes, set by the height. The width then follows
+        // the glyph's own aspect; deriving it from a second scale would let
+        // rounding stretch the drawing.
+        let margin_y = GLYPH_MARGIN_Y * shape.width().max(shape.height());
+        let units_per_px = (shape.height() + 2.0 * margin_y) / height as f32;
+        let width = (shape.width() / units_per_px + 2.0 * GLYPH_MARGIN_X_PX)
+            .round()
+            .max(1.0) as u32;
 
         let centre_u = (shape.left + shape.right) / 2.0;
         let centre_v = (shape.top + shape.bottom) / 2.0;
@@ -676,54 +698,93 @@ mod tests {
         }
     }
 
-    /// The pixmap must be cropped to the glyph, not padded out to a square.
-    /// Transparent columns inside it become visible gaps either side of the
-    /// icon, which is what made this one sit further from its neighbours than
-    /// they sit from each other.
+    /// The pixmap must be cropped to the glyph and its margin, with nothing
+    /// spare. Transparent columns beyond that become visible gaps either side
+    /// of the icon, which is what made this one sit further from its
+    /// neighbours than they sat from each other -- a square pixmap left the
+    /// microphone filling only 65% of its own width.
+    ///
+    /// Checked as a fraction rather than a row count because the margin is
+    /// deliberate; what must not come back is *slack*.
     #[test]
-    fn pixmaps_are_cropped_to_their_glyph() {
+    fn pixmaps_are_cropped_to_glyph_and_margin() {
         for icon in ICONS {
-            let rendered = imp::test_icon(icon, 32);
+            let rendered = imp::test_icon(icon, 48);
             let (w, h) = (rendered.width as usize, rendered.height as usize);
             let opaque = |x: usize, y: usize| rendered.data[(y * w + x) * 4] > 0;
 
             let rows: Vec<usize> = (0..h).filter(|&y| (0..w).any(|x| opaque(x, y))).collect();
             let cols: Vec<usize> = (0..w).filter(|&x| (0..h).any(|y| opaque(x, y))).collect();
 
+            let tall = (rows.last().unwrap() - rows.first().unwrap() + 1) as f32 / h as f32;
+            let wide = (cols.last().unwrap() - cols.first().unwrap() + 1) as f32 / w as f32;
+
             assert!(
-                *rows.first().unwrap() <= 1 && *rows.last().unwrap() >= h - 2,
-                "{icon:?}: dead rows, glyph spans {}..{} of {h}",
-                rows.first().unwrap(),
-                rows.last().unwrap()
+                tall > 0.70,
+                "{icon:?}: glyph is only {:.0}% of the pixmap's height",
+                tall * 100.0
             );
             assert!(
-                *cols.first().unwrap() <= 1 && *cols.last().unwrap() >= w - 2,
-                "{icon:?}: dead columns, glyph spans {}..{} of {w}",
-                cols.first().unwrap(),
-                cols.last().unwrap()
+                wide > 0.70,
+                "{icon:?}: glyph is only {:.0}% of the pixmap's width",
+                wide * 100.0
+            );
+
+            // Centred: an off-centre glyph would read as the icon sitting
+            // closer to one neighbour than the other.
+            let left = *cols.first().unwrap();
+            let right = w - 1 - cols.last().unwrap();
+            assert!(
+                left.abs_diff(right) <= 1,
+                "{icon:?}: not centred, {left} blank columns left and {right} right"
             );
         }
     }
 
-    /// Cropping must not stretch the drawing: the pixmap's aspect has to track
-    /// the glyph's own, or the microphone comes out fat and the lamp squashed.
+    /// The width must be the glyph's own, at the scale the height sets, plus
+    /// the horizontal margin and nothing else. Getting this wrong either
+    /// stretches the drawing or pads it back out into the gap that started
+    /// all this.
     #[test]
-    fn pixmap_aspect_follows_the_glyph() {
+    fn pixmap_width_follows_the_glyph() {
         for icon in ICONS {
             let (left, top, right, bottom) = imp::declared_bounds(icon);
-            let glyph_aspect = (right - left) / (bottom - top);
+            let (gw, gh) = (right - left, bottom - top);
+            let margin_y = imp::GLYPH_MARGIN_Y * gw.max(gh);
 
             for size in SIZES {
                 let rendered = imp::test_icon(icon, size);
-                let pixmap_aspect = rendered.width as f32 / rendered.height as f32;
-                // A pixel of rounding at 16px is ~6%, so the tolerance has to
-                // scale with how coarse the pixmap is.
-                let tolerance = 1.5 / size as f32;
+                let units_per_px = (gh + 2.0 * margin_y) / size as f32;
+                let expected = (gw / units_per_px + 2.0 * imp::GLYPH_MARGIN_X_PX).round() as i32;
                 assert!(
-                    (pixmap_aspect - glyph_aspect).abs() < tolerance,
-                    "{icon:?} at {size}: pixmap {}x{} is {pixmap_aspect:.3}, glyph is {glyph_aspect:.3}",
-                    rendered.width,
-                    rendered.height
+                    (rendered.width - expected).abs() <= 1,
+                    "{icon:?} at {size}: pixmap is {}px wide, expected {expected}px",
+                    rendered.width
+                );
+            }
+        }
+    }
+
+    /// Horizontal padding is pure spacing on the bar -- a host lays the item
+    /// out at the pixmap's width -- so it has to stay at the one pixel the
+    /// antialiased edge needs. This is the regression guard for the icon
+    /// sitting further from its neighbour than they sit from each other.
+    #[test]
+    fn horizontal_padding_stays_hairline() {
+        for icon in ICONS {
+            for size in SIZES {
+                let rendered = imp::test_icon(icon, size);
+                let (w, h) = (rendered.width as usize, rendered.height as usize);
+                let opaque = |x: usize, y: usize| rendered.data[(y * w + x) * 4] > 0;
+
+                let cols: Vec<usize> =
+                    (0..w).filter(|&x| (0..h).any(|y| opaque(x, y))).collect();
+                let left = *cols.first().unwrap();
+                let right = w - 1 - cols.last().unwrap();
+
+                assert!(
+                    left <= 1 && right <= 1,
+                    "{icon:?} at {size}: {left} blank columns left, {right} right"
                 );
             }
         }

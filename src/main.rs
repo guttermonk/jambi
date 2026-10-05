@@ -200,7 +200,15 @@ impl std::fmt::Display for Mode {
 }
 
 /// Settings specific to live dictation
+///
+/// `deny_unknown_fields` for the same reason as DaemonConfig, and learned the
+/// same way: the tray settings belong to `[daemon]`, and while they sat in
+/// `[dictate]` by mistake serde dropped them without a word. A setting that
+/// silently does nothing is indistinguishable from a broken feature, so a
+/// stray key -- a typo, or one that moved between tables -- is better as an
+/// error that names it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DictateConfig {
     /// Milliseconds to wait after recording stops before typing, giving the
     /// keybind's modifiers time to come back up. See the note in
