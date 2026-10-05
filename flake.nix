@@ -83,10 +83,21 @@
           buildInputs = commonBuildInputs;
 
           # Set up vosk library before build
+          #
+          # libstdc++ sits alongside libvosk on LD_LIBRARY_PATH for the same
+          # reason the dev shell lists it: libvosk.so links against it, and
+          # nothing puts it on the binary's RPATH -- it is a transitive
+          # dependency of libvosk rather than something the crate links
+          # directly, so the cc wrapper has no -L to turn into an rpath entry.
+          # The installed binary gets it from wrapProgram below; the test
+          # binary checkPhase runs is unwrapped and would die on startup with
+          # "libstdc++.so.6: cannot open shared object file" (exit 127).
+          # These exports carry into checkPhase because the phases share one
+          # shell.
           preBuild = ''
             export VOSK_LIB_DIR="${voskLibrary}"
             export RUSTFLAGS="-L ${voskLibrary}"
-            export LD_LIBRARY_PATH="${voskLibrary}:$LD_LIBRARY_PATH"
+            export LD_LIBRARY_PATH="${voskLibrary}:${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
           '';
 
           # Environment variables for build
