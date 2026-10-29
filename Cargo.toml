@@ -25,7 +25,7 @@ zip = "0.6"
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Clipboard integration
 arboard = "3.3"
