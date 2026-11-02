@@ -42,7 +42,14 @@ jobs:
 
       # -L so a compile error arrives in the log instead of as "builder for
       # '/nix/store/...' failed with exit code 1" and nothing else.
-      - run: nix build -L
+      #
+      # --fallback because cache.nixos.org drops connections often enough to
+      # matter: a mid-download broken pipe followed by an HTTP 416 on the resume
+      # leaves nix declaring "no substituter that can build it" and failing the
+      # run, over a dependency it could perfectly well have built. This turns
+      # that into a slower build rather than a red tick. It cannot mask a real
+      # break -- a genuine compile error still fails, just from source.
+      - run: nix build -L --fallback
 
   # Clippy lives in the dev shell rather than in checkPhase: clippy and rustfmt
   # are not buildInputs of the package, and wiring them in would make every
@@ -84,7 +91,7 @@ jobs:
       # LD_LIBRARY_PATH but never touches VOSK_LIB_DIR.
       - run: |
           export VOSK_LIB_DIR="$HOME/.cache/vosk"
-          nix develop --command cargo clippy --all-targets --all-features
+          nix develop --fallback --command cargo clippy --all-targets --all-features
 
   # No rustfmt job. .rustfmt.toml does not currently parse on stable -- `verbose`
   # expects a string, not a boolean -- and once that is fixed, roughly half the
