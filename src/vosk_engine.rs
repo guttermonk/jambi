@@ -666,9 +666,14 @@ impl VoskEngine {
         
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            let outpath = target_dir.join(file.mangled_name());
-            
-            if file.name().ends_with('/') {
+            // zip 9 made both of these fallible -- a name that is not valid
+            // UTF-8, or that cannot be sanitised into a relative path, is now
+            // an error rather than something quietly rewritten. Propagating it
+            // means a malformed archive stops extraction instead of writing an
+            // entry under a name nobody asked for.
+            let outpath = target_dir.join(file.mangled_name()?);
+
+            if file.name()?.ends_with('/') {
                 std::fs::create_dir_all(&outpath)?;
             } else {
                 if let Some(p) = outpath.parent() {

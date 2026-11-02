@@ -21,7 +21,18 @@ tokio = { version = "1.0", features = ["full"] }
 
 # Speech recognition
 vosk = "0.3"
-zip = "0.6"
+
+# 9.x rather than 0.6: 0.6.6 is the subject of GHSA-8hxf-qr8p-62x4, an AES
+# entry HMAC bypass, and 9.0.5 is the first fixed release. Dependabot could not
+# propose it on its own -- its resolver capped at 7.2.0, below the fix.
+#
+# default-features = false drops aes-crypto, so the code that advisory is about
+# is not compiled in at all rather than merely patched. What is left is deflate,
+# which is what the Vosk model archives use. This is only reached when the
+# `unzip` binary is missing or fails (see extract_zip_fallback), and a model
+# archive compressed some other way would now fail there with an unsupported
+# method error instead of extracting -- acceptable, as alphacep ships deflate.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # Error handling
 anyhow = "1.0"
@@ -64,8 +75,10 @@ ksni = { version = "0.3.6", default-features = false, features = ["tokio"], opti
 # position of only working if the host happens to have the right tool built
 # the right way.
 #
-# 0.5 rather than 0.6: same decoders, but an MSRV of 1.53 against 0.6's 1.85,
-# which keeps the "Rust 1.70+" in the README true.
+# 0.5 rather than 0.6 for no reason that still holds: it was chosen for an MSRV
+# of 1.53 against 0.6's 1.85, to keep a "Rust 1.70+" README claim true. The zip
+# security bump put the floor at 1.89 regardless, so 0.6 is available whenever
+# someone wants to look at what it changes.
 #
 # Only the formats worth carrying. `isomp4`/`aac`/`alac` are the point of the
 # exercise -- phones record m4a -- and the rest come close to free.
