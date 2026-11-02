@@ -26,8 +26,12 @@ use tracing::{info, warn, error};
 // table was present, which made even config.example.toml fail to parse on
 // `verbose` -- a runtime flag that main.rs overwrites from --verbose anyway and
 // that no user would think to put in a config file.
+//
+// `deny_unknown_fields` alongside it, so a misspelt key inside [audio] is an
+// error naming the offender instead of a setting that silently does nothing.
+// The two compose: defaults still fill in whatever the file omits.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
     /// Sample rate in Hz (typically 16000 for speech)
     pub sample_rate: u32,

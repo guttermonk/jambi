@@ -338,7 +338,14 @@ impl Default for DictateConfig {
 /// Every field defaults, so a config file may set as little as `mode = "live"`
 /// and still parse. Before that, `[audio]` and `[vosk]` were mandatory and a
 /// one-line config was a hard error.
+///
+/// `deny_unknown_fields` for the reason given on DictateConfig and DaemonConfig,
+/// which had it first: a mistyped table name -- `[audoi]` for `[audio]` -- used
+/// to be dropped in silence, leaving every audio setting at its default and no
+/// way to tell that from the file not being read. It composes with the per-field
+/// defaults above, so the one-line config described here still parses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     #[serde(default)]
     pub audio: AudioConfig,
@@ -1541,5 +1548,40 @@ mod tests {
         assert_eq!(truncate_string("hello", 10), "hello");
         assert_eq!(truncate_string("hello world", 8), "hello...");
         assert_eq!(truncate_string("hi", 1), "h");
+    }
+
+    /// A key or table nobody declared is an error, and the error says which.
+    ///
+    /// Guarding the `deny_unknown_fields` attributes rather than serde itself:
+    /// they are three separate one-word additions that a refactor can drop
+    /// without anything else complaining, and what returns if they go is the
+    /// silent-default behaviour they were added to remove.
+    #[test]
+    fn unknown_config_keys_are_rejected_by_name() {
+        let misspelt_table = toml::from_str::<AppConfig>("[audoi]\nsample_rate = 16000\n")
+            .expect_err("a misspelt table should not parse")
+            .to_string();
+        assert!(
+            misspelt_table.contains("audoi") && misspelt_table.contains("audio"),
+            "error should name the offender and the alternatives, got: {misspelt_table}"
+        );
+
+        let misspelt_key = toml::from_str::<AppConfig>("[audio]\nsampel_rate = 16000\n")
+            .expect_err("a misspelt key should not parse")
+            .to_string();
+        assert!(
+            misspelt_key.contains("sampel_rate") && misspelt_key.contains("sample_rate"),
+            "error should name the offender and the alternatives, got: {misspelt_key}"
+        );
+    }
+
+    /// The other half of the bargain: defaults still fill in what is absent, so
+    /// the one-line config AppConfig's doc comment promises keeps working.
+    #[test]
+    fn a_one_line_config_still_parses() {
+        let config: AppConfig =
+            toml::from_str("mode = \"live\"\n").expect("a single key should be enough");
+        assert_eq!(config.mode, Mode::Live);
+        assert_eq!(config.audio.sample_rate, AudioConfig::default().sample_rate);
     }
 }

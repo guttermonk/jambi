@@ -146,8 +146,12 @@ impl std::fmt::Display for VoskModel {
 /// Vosk transcription configuration
 // See the note on AudioConfig: `serde(default)` keeps every key optional so a
 // config file can set just `model` without restating the rest.
+//
+// `deny_unknown_fields` alongside it, for the same reason as AudioConfig: a key
+// misspelt or left over from a rename should name itself rather than quietly
+// leave the setting at its default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VoskConfig {
     /// Model to use for transcription
     pub model: VoskModel,
