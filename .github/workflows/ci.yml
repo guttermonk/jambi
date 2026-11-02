@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here writes to the repo or reads a secret, so the token stays
+# read-only. This also means Dependabot PRs -- which get a read-only token and
+# no secrets regardless -- run exactly the same job as any other PR.
+permissions:
+  contents: read
+
+# A second push to a PR makes the first run's result irrelevant, so cancel it.
+# Pushes to main are left to finish: the per-commit result there is the record
+# of what last built, and cancelling would leave gaps in it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The package build is the gate, and deliberately the only one. buildRustPackage
+  # runs the test suite in checkPhase, so this single job covers compiling the
+  # release profile, the tests, and the flake itself. It is also the only check
+  # that can catch a Cargo.lock which no longer satisfies Cargo.toml: the flake
+  # feeds the lockfile to `cargoLock.lockFile`, and a mismatch fails here rather
+  # than quietly resolving to something else.
+  #
+  # That last part is the whole reason this workflow exists -- it is what turns a
+  # Dependabot PR from a judgement call into a green or red tick.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          # Stated explicitly rather than relying on the action's default, which
+          # has changed between majors.
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # -L so a compile error arrives in the log instead of as "builder for
+      # '/nix/store/...' failed with exit code 1" and nothing else.
+      - run: nix build -L
+
+  # Clippy lives in the dev shell rather than in checkPhase: clippy and rustfmt
+  # are not buildInputs of the package, and wiring them in would make every
+  # `nix build` -- including a user's `nix run github:guttermonk/jambi` -- pay
+  # for a lint it has no use for.
+  #
+  # Not `-D warnings`. The tree currently has 109 clippy warnings, 91 of them
+  # `uninlined_format_args`, so failing on warnings would make this job red on
+  # arrival and train everyone to ignore it. It reports instead; add
+  # `-- -D warnings` here once that backlog is cleared. Most of it is machine
+  # fixable: `cargo clippy --fix --all-targets --all-features`.
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # The dev shell's hook wgets a ~7MB zip from the vosk-api releases on
+      # first entry and leaves a 26MB libvosk.so in ~/.cache/vosk. Cache it on
+      # the version string so a Vosk bump in flake.nix invalidates the entry by
+      # itself.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/vosk
+          key: vosk-0.3.45
+
+      # VOSK_LIB_DIR rather than letting build.rs search: build.rs checks that
+      # variable first and otherwise probes a path list that does not include
+      # ~/.cache/vosk, where the shell hook actually puts the library. On a
+      # developer machine something else has usually populated one of those
+      # paths; a clean runner has none of them, so say it outright.
+      # Exported out here rather than inside `bash -c '...'` so there is only one
+      # level of quoting to get wrong; `nix develop --command` passes the
+      # environment through, and the shell hook sets RUSTFLAGS and
+      # LD_LIBRARY_PATH but never touches VOSK_LIB_DIR.
+      - run: |
+          export VOSK_LIB_DIR="$HOME/.cache/vosk"
+          nix develop --command cargo clippy --all-targets --all-features
+
+  # No rustfmt job. .rustfmt.toml does not currently parse on stable -- `verbose`
+  # expects a string, not a boolean -- and once that is fixed, roughly half the
+  # file (imports_granularity, group_imports, wrap_comments, comment_width,
+  # version) is nightly-only and silently ignored, so a `--check` gate would
+  # enforce something quite different from what the file describes. Worth sorting
+  # out, but it is a formatting decision rather than a CI one.

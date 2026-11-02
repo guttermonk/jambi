@@ -15,6 +15,14 @@ updates:
         update-types:
           - "patch"
 
-  # No github-actions entry: this repo has no workflows yet (only
-  # .github/FUNDING.YML). Add one here once CI exists, otherwise Dependabot
-  # has no action references to scan.
+  # Actions referenced by .github/workflows/ci.yml. Grouped into one PR: these
+  # are four pinned major tags that move together and nothing here depends on
+  # their versions, so splitting them buys nothing.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"
