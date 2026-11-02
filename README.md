@@ -53,7 +53,7 @@ sudo dnf install alsa-lib-devel openssl-devel
 #### Standard Build Installation
 
 **Prereqs for building from source:**
-- Rust 1.70+ (install from [rustup.rs](https://rustup.rs/))
+- Rust 1.89+ (install from [rustup.rs](https://rustup.rs/))
 - ALSA development libraries (Linux)
 - OpenSSL development libraries
 
