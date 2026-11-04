@@ -64,6 +64,12 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.4", features = ["derive"], optional = true }
 nix = { version = "0.30.1", features = ["signal"] }
 
+# For `malloc_trim` alone, after the tray's off-click releases the warm model.
+# Already in the tree as a transitive dependency of nix/cpal/tokio, so this
+# costs a line in the manifest and nothing in the closure. See
+# `daemon::release_warm_model` for why a plain drop is not enough.
+libc = "0.2"
+
 # System tray indicator for the daemon. StatusNotifierItem over D-Bus, the
 # protocol Vorta/KeePassXC/OpenSnitch use, via zbus -- so no libdbus to link
 # and nothing extra for the Nix build to find on the host.

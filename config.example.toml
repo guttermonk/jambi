@@ -108,9 +108,10 @@ notifications = true
 enabled = true
 
 # Show a tray indicator while the daemon runs, so it is visible alongside other
-# background applications. The icon turns red while a recording is in progress.
-# No effect on a desktop with no system tray, where the daemon simply runs
-# without one.
+# background applications. The icon turns red while a recording is in progress,
+# and a left click turns the daemon off and on: off releases the warm model and
+# dims the icon, on loads it again. No effect on a desktop with no system tray,
+# where the daemon simply runs without one.
 tray = true
 
 # Which glyph the indicator draws:

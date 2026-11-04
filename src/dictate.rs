@@ -112,6 +112,13 @@ pub async fn start(
                 notify(&dictate_config, "⚠️ Already recording", Expiry::BRIEF);
                 return Ok(());
             }
+            Ok(Reply::NotServing) => {
+                // The daemon is turned off from its tray icon. Falling through
+                // to the in-process path rather than returning is the whole
+                // point of that state: dictation keeps working while jambi is
+                // off, it just pays for its own model load again.
+                debug!("the daemon is turned off, recording in-process");
+            }
             Ok(Reply::Error { message }) => {
                 error!("daemon refused to start recording: {}", message);
                 notify(&dictate_config, "❌ Recording failed - check the microphone", Expiry::BRIEF);

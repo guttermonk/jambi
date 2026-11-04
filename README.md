@@ -195,6 +195,34 @@ model and offers **Quit Jambi daemon**. Set `tray = false` under `[daemon]` to
 run without one; on a desktop with no tray at all the daemon just carries on
 and logs that it has no indicator.
 
+**Left click turns the daemon off and on.** Clicking it off releases the warm
+model and dims the icon; clicking it on loads the model again and the icon
+comes back to full strength, briefly part-faded while the load runs. The
+memory goes with it -- measured on the small English model, the daemon's RSS
+goes from 146MB to 26MB and back, and repeated toggling stays flat rather than
+climbing.
+
+Off is not quit. The process stays, and so does the icon, because an icon that
+vanished could not be clicked back on; **Quit Jambi daemon** in the menu is
+still there for when that is what you mean. Nothing breaks while it is off:
+every command, dictation included, finds a daemon that says "do it yourself"
+and loads its own model exactly as it would with no daemon running -- the
+~800ms is simply back. `jambi daemon status` reports it:
+
+```console
+$ jambi daemon status
+⏸️  Daemon turned off (pid 3312)
+   Socket:  /run/user/1000/jambi/daemon.sock
+   Model:   vosk-model-small-en-us-0.15 (released)
+   Uptime:  2h 14m
+   State:   off - click the tray icon to start it
+```
+
+A recording in progress ends when you click it off, since an "off" that kept
+the microphone open would not be off; its text is dropped, nothing having asked
+for it. If the model has become unreadable since startup -- deleted from the
+cache, say -- the click back on logs the reason and leaves the icon dimmed.
+
 Appearance is chosen under `[daemon]`:
 
 ```toml

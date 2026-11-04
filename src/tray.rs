@@ -10,6 +10,12 @@
 //! received its release (and is quietly recording until the cap) is visible
 //! rather than something you find out about from the microphone light.
 //!
+//! A left click turns the daemon off and on again -- off meaning the warm
+//! model is released and front-ends go back to loading their own, with the
+//! icon staying put, dimmed, so there is something left to click. The
+//! indicator does none of that itself: it signals the daemon, which owns the
+//! model, so everything here stays as cheap as a property read.
+//!
 //! The indicator is strictly decoration. `spawn` reports failures and returns
 //! a handle whose methods become no-ops, because a desktop with no tray -- or
 //! a daemon started before the bar comes up -- must not stop the daemon from
@@ -81,6 +87,29 @@ impl Default for TrayStyle {
     }
 }
 
+/// What the daemon is doing, as far as the indicator is concerned.
+///
+/// One enum rather than two booleans because the states are exclusive: a
+/// daemon that has released its model cannot be recording, and a pair of flags
+/// would make that combination expressible and then have to rule it out at
+/// every place the icon, the tooltip and the menu are drawn.
+#[cfg_attr(not(feature = "tray"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    /// Clicked off: no model in memory, no work taken. Drawn dimmed, because
+    /// the icon has to stay visible to be clicked back on and must not look
+    /// like a daemon that is working.
+    Stopped,
+    /// Clicked on, reading the model off disk. Its own state because that is
+    /// seconds long for the larger models, and a click that appeared to do
+    /// nothing for seconds is a click the user makes again.
+    Loading,
+    /// Warm and waiting.
+    Idle,
+    /// Recording right now.
+    Recording,
+}
+
 /// What the indicator displays. Mirrored from the daemon rather than read back
 /// out of it, because the tray host polls these properties at its leisure and
 /// cannot be given a future to await.
@@ -90,8 +119,10 @@ impl Default for TrayStyle {
 #[cfg_attr(not(feature = "tray"), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct TrayState {
+    /// The configured model. Named even while stopped, since it is what the
+    /// next click will load.
     pub model: String,
-    pub recording: bool,
+    pub activity: Activity,
 }
 
 #[cfg(feature = "tray")]
@@ -117,11 +148,37 @@ mod imp {
         /// Shared with the daemon's accept loop, so "Quit" takes the same exit
         /// path as SIGTERM and the socket is cleaned up either way.
         shutdown: Arc<Notify>,
+        /// Signalled on a left click. The daemon's watcher does the starting,
+        /// stopping and delivering; see `daemon::toggle_recording`.
+        toggle: Arc<Notify>,
     }
 
     impl ksni::Tray for JambiTray {
+        /// A left click has to reach `activate` below rather than open the
+        /// menu. This is ksni's default, and is stated because the toggle is
+        /// the whole reason the item is clickable: were the default to change,
+        /// the click would quietly become a second way to open the menu.
+        const MENU_ON_ACTIVATE: bool = false;
+
         fn id(&self) -> String {
             "jambi".into()
+        }
+
+        /// Left click: turn the daemon off, or back on.
+        ///
+        /// Only a signal is sent. This runs on the tray's own task holding
+        /// `&mut self`, so it cannot await a model being read off disk -- and
+        /// a host that called this and waited would be blocked for the length
+        /// of that load.
+        ///
+        /// `notify_one` keeps a permit when nobody is waiting yet, so a click
+        /// that lands while the watcher is still busy with the last one is
+        /// remembered rather than lost. Several clicks in a row collapse into
+        /// one, which is the right answer for an icon being prodded: the end
+        /// state is what the user is asking for, not one flip per click.
+        fn activate(&mut self, _x: i32, _y: i32) {
+            debug!("tray activated, toggling the daemon");
+            self.toggle.notify_one();
         }
 
         fn title(&self) -> String {
@@ -140,20 +197,26 @@ mod imp {
         }
 
         fn icon_pixmap(&self) -> Vec<Icon> {
-            let color = ink(self.style, self.state.recording);
+            let (color, opacity) = appearance(self.style, self.state.activity);
             SIZES
                 .iter()
-                .map(|&size| render(self.style.icon, size, color))
+                .map(|&size| render(self.style.icon, size, color, opacity))
                 .collect()
         }
 
         fn tool_tip(&self) -> ToolTip {
             ToolTip {
                 title: "Jambi".into(),
-                description: if self.state.recording {
-                    format!("Recording · {}", self.state.model)
-                } else {
-                    format!("Idle · {} (warm)", self.state.model)
+                description: match self.state.activity {
+                    // Says what a click does, because a dimmed icon reports
+                    // that jambi is off without saying it can be turned back
+                    // on from here.
+                    Activity::Stopped => {
+                        format!("Stopped · {} released — click to start", self.state.model)
+                    }
+                    Activity::Loading => format!("Starting · loading {}", self.state.model),
+                    Activity::Idle => format!("Idle · {} (warm)", self.state.model),
+                    Activity::Recording => format!("Recording · {}", self.state.model),
                 },
                 ..Default::default()
             }
@@ -163,22 +226,28 @@ mod imp {
             let shutdown = Arc::clone(&self.shutdown);
 
             vec![
-                // Disabled items: this is a status readout, not a control
-                // panel. Dictation is driven from the keybind, which is also
-                // the only context that has the environment to type the result
-                // -- offering "start recording" here would record into nowhere.
+                // Disabled items: the menu is a status readout, and the one
+                // control worth having -- off and on -- is the left click,
+                // which is one gesture rather than a click, a hunt and a
+                // second click. Repeating it here would only add a slower way
+                // to do the same thing. "Quit" stays, being the thing a click
+                // deliberately does not do.
                 StandardItem {
-                    label: if self.state.recording {
-                        "● Recording".into()
-                    } else {
-                        "Idle".into()
+                    label: match self.state.activity {
+                        Activity::Stopped => "Stopped".into(),
+                        Activity::Loading => "Starting...".into(),
+                        Activity::Idle => "Idle".into(),
+                        Activity::Recording => "● Recording".into(),
                     },
                     enabled: false,
                     ..Default::default()
                 }
                 .into(),
                 StandardItem {
-                    label: format!("Model: {}", self.state.model),
+                    label: match self.state.activity {
+                        Activity::Stopped => format!("Model: {} (released)", self.state.model),
+                        _ => format!("Model: {}", self.state.model),
+                    },
                     enabled: false,
                     ..Default::default()
                 }
@@ -204,11 +273,17 @@ mod imp {
             Self(None)
         }
 
-        pub async fn spawn(style: TrayStyle, state: TrayState, shutdown: Arc<Notify>) -> Self {
+        pub async fn spawn(
+            style: TrayStyle,
+            state: TrayState,
+            shutdown: Arc<Notify>,
+            toggle: Arc<Notify>,
+        ) -> Self {
             let tray = JambiTray {
                 style,
                 state,
                 shutdown,
+                toggle,
             };
 
             // `assume_sni_available` matters for the case this daemon is built
@@ -267,17 +342,33 @@ mod imp {
         }
     }
 
-    /// The color to draw in, for a given style and recording state.
+    /// How faint a stopped daemon's glyph is drawn, as a fraction of full
+    /// coverage.
+    ///
+    /// Opacity rather than a paler ink, because the panel's color is not
+    /// knowable: compositing against whatever is behind is what makes "faded"
+    /// read as faded on a dark panel and on a light one. Low enough to be
+    /// unmistakably off at a glance, high enough to still find and click.
+    const STOPPED_OPACITY: f32 = 0.3;
+
+    /// Part-way back, for the second or two a model takes to load: clearly on
+    /// its way without yet claiming to be ready.
+    const LOADING_OPACITY: f32 = 0.65;
+
+    /// The color and opacity to draw in, for a given style and state.
     ///
     /// Separate from `icon_pixmap` so it can be tested without standing up a
-    /// tray service: that the recording tint can be switched off is the kind
-    /// of thing that silently stops working.
-    fn ink(style: TrayStyle, recording: bool) -> Rgb {
+    /// tray service: that the recording tint can be switched off, and that a
+    /// stopped daemon looks different from a working one, are both the kind of
+    /// thing that silently stops working.
+    fn appearance(style: TrayStyle, activity: Activity) -> (Rgb, f32) {
         let (idle, active) = palette(style.color);
-        if recording && style.red_when_recording {
-            active
-        } else {
-            idle
+        match activity {
+            Activity::Stopped => (idle, STOPPED_OPACITY),
+            Activity::Loading => (idle, LOADING_OPACITY),
+            Activity::Idle => (idle, 1.0),
+            Activity::Recording if style.red_when_recording => (active, 1.0),
+            Activity::Recording => (idle, 1.0),
         }
     }
 
@@ -426,7 +517,7 @@ mod imp {
     /// from its neighbour than they sit from each other.
     pub(super) const GLYPH_MARGIN_X_PX: f32 = 1.0;
 
-    /// Draw `icon` at `height` pixels tall, in `color`.
+    /// Draw `icon` at `height` pixels tall, in `color`, at `opacity`.
     ///
     /// The pixmap is cropped to the glyph rather than padded out to a square.
     /// That is what keeps the icon spaced like its neighbours in the tray: a
@@ -441,7 +532,7 @@ mod imp {
     /// crisp result at whatever size the host asks for instead of one blurred
     /// from a single bitmap. The shipped SVG cannot be used directly -- the
     /// specification takes pixels, not vectors.
-    fn render(icon: TrayIcon, height: u32, color: Rgb) -> Icon {
+    fn render(icon: TrayIcon, height: u32, color: Rgb, opacity: f32) -> Icon {
         let shape = glyph(icon);
 
         /// Samples per axis. 3x3 is enough to take the stair-steps off strokes
@@ -479,7 +570,11 @@ mod imp {
                     }
                 }
 
-                let alpha = (hits * 255 / (SAMPLES * SAMPLES)) as u8;
+                // Coverage scaled by the state's opacity: a stopped daemon's
+                // glyph is the same shape drawn faint, so it reads as this
+                // icon switched off rather than as a different icon.
+                let coverage = hits as f32 / (SAMPLES * SAMPLES) as f32;
+                let alpha = (coverage * opacity * 255.0).round() as u8;
                 let offset = ((y * width + x) * 4) as usize;
                 data[offset] = alpha;
                 data[offset + 1] = color[0];
@@ -578,7 +673,38 @@ mod imp {
 
     #[cfg(test)]
     pub(super) fn test_icon(icon: TrayIcon, size: u32) -> Icon {
-        render(icon, size, palette(TrayColor::White).0)
+        render(icon, size, palette(TrayColor::White).0, 1.0)
+    }
+
+    /// The glyph as the indicator would draw it in a given state, for the
+    /// checks on how plainly "off" reads.
+    #[cfg(test)]
+    pub(super) fn test_icon_for(style: TrayStyle, activity: Activity, size: u32) -> Icon {
+        let (color, opacity) = appearance(style, activity);
+        render(style.icon, size, color, opacity)
+    }
+
+    /// Deliver a left click to an otherwise unused indicator, so the test can
+    /// watch what reaches the daemon.
+    #[cfg(test)]
+    pub(super) fn test_click(toggle: Arc<Notify>) {
+        use ksni::Tray as _;
+
+        let mut tray = JambiTray {
+            style: TrayStyle::default(),
+            state: TrayState {
+                model: "small-en-us".into(),
+                activity: Activity::Idle,
+            },
+            shutdown: Arc::new(Notify::new()),
+            toggle,
+        };
+        tray.activate(0, 0);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_menu_on_activate() -> bool {
+        <JambiTray as ksni::Tray>::MENU_ON_ACTIVATE
     }
 
     #[cfg(test)]
@@ -587,8 +713,8 @@ mod imp {
     }
 
     #[cfg(test)]
-    pub(super) fn test_ink(style: TrayStyle, recording: bool) -> Rgb {
-        ink(style, recording)
+    pub(super) fn test_appearance(style: TrayStyle, activity: Activity) -> (Rgb, f32) {
+        appearance(style, activity)
     }
 
     /// A glyph's own bounding box, found by sampling rather than read off the
@@ -640,6 +766,7 @@ mod imp {
             _style: TrayStyle,
             _state: TrayState,
             _shutdown: Arc<Notify>,
+            _toggle: Arc<Notify>,
         ) -> Self {
             debug!("built without the tray feature; no indicator");
             Self
@@ -655,8 +782,13 @@ pub use imp::Tray;
 
 #[cfg(all(test, feature = "tray"))]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+
     use super::imp;
-    use super::{TrayColor, TrayIcon, TrayStyle};
+    use super::{Activity, TrayColor, TrayIcon, TrayStyle};
 
     const ICONS: [TrayIcon; 2] = [TrayIcon::Microphone, TrayIcon::Lamp];
     const SIZES: [u32; 5] = [16, 22, 24, 32, 48];
@@ -868,6 +1000,31 @@ mod tests {
         }
     }
 
+    /// A left click has to leave a signal behind for the daemon's watcher,
+    /// which is the whole of the indicator's half of the toggle.
+    #[tokio::test]
+    async fn a_left_click_signals_the_daemon() {
+        let toggle = Arc::new(Notify::new());
+        imp::test_click(Arc::clone(&toggle));
+
+        // `notify_one` leaves a permit when nobody is waiting yet -- the usual
+        // case, the watcher being between clicks -- so this returns at once.
+        tokio::time::timeout(Duration::from_millis(100), toggle.notified())
+            .await
+            .expect("a click left nothing for the daemon to act on");
+    }
+
+    /// `MENU_ON_ACTIVATE` sends a left click to the menu instead of
+    /// `activate`, which would leave the toggle wired up and never called --
+    /// the icon would simply open its menu twice over.
+    #[test]
+    fn a_left_click_is_not_diverted_to_the_menu() {
+        assert!(
+            !imp::test_menu_on_activate(),
+            "left click opens the menu, so the daemon toggle is unreachable"
+        );
+    }
+
     /// `tray_red_when_recording = false` has to actually stop the color
     /// changing, and must leave the idle color alone while doing it. A setting
     /// that reads fine but does nothing is the failure to guard against here.
@@ -884,20 +1041,71 @@ mod tests {
                 ..on
             };
 
+            let ink = |style, activity| imp::test_appearance(style, activity).0;
+
             assert_ne!(
-                imp::test_ink(on, true),
-                imp::test_ink(on, false),
+                ink(on, Activity::Recording),
+                ink(on, Activity::Idle),
                 "{color:?}: tint on, but recording draws the idle color"
             );
             assert_eq!(
-                imp::test_ink(off, true),
-                imp::test_ink(off, false),
+                ink(off, Activity::Recording),
+                ink(off, Activity::Idle),
                 "{color:?}: tint off, but recording still changes color"
             );
             assert_eq!(
-                imp::test_ink(on, false),
-                imp::test_ink(off, false),
+                ink(on, Activity::Idle),
+                ink(off, Activity::Idle),
                 "{color:?}: the switch moved the idle color too"
+            );
+        }
+    }
+
+    /// A stopped daemon has to look stopped. The icon staying in the tray is
+    /// what makes the toggle reversible, so the only thing distinguishing
+    /// "off" from "working" is how faintly it is drawn -- and `Loading` has to
+    /// sit between the two, or a click on a large model looks like nothing
+    /// happened for several seconds.
+    #[test]
+    fn a_stopped_daemon_is_drawn_faintest() {
+        for color in [TrayColor::White, TrayColor::Black] {
+            let style = TrayStyle {
+                color,
+                ..Default::default()
+            };
+
+            // Summed alpha rather than one pixel: it is the whole glyph's
+            // presence on the panel that has to drop, and summing is immune to
+            // which pixel happens to sit on an edge.
+            let weight = |activity| {
+                imp::test_icon_for(style, activity, 32)
+                    .data
+                    .chunks_exact(4)
+                    .map(|pixel| pixel[0] as u64)
+                    .sum::<u64>()
+            };
+
+            let (stopped, loading, idle) = (
+                weight(Activity::Stopped),
+                weight(Activity::Loading),
+                weight(Activity::Idle),
+            );
+
+            assert!(
+                stopped < loading && loading < idle,
+                "{color:?}: stopped {stopped}, loading {loading}, idle {idle} -- \
+                 off does not read as fainter than on"
+            );
+            // Faint, not invisible: an icon nobody can see is an icon nobody
+            // can click back on.
+            assert!(
+                stopped > idle / 10,
+                "{color:?}: the stopped glyph is all but invisible ({stopped} of {idle})"
+            );
+            assert_eq!(
+                weight(Activity::Recording),
+                idle,
+                "{color:?}: recording is drawn at less than full strength"
             );
         }
     }

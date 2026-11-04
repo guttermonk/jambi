@@ -590,6 +590,12 @@ impl Engine {
             // Asked rather than assumed: the daemon's model comes from the
             // config *it* was started with, which may not be this process's.
             match client.request(&daemon::Request::Status).await {
+                // Turned off from its tray icon. Loading a model here is
+                // exactly what it is asking for, and is what jambi did before
+                // there was a daemon at all.
+                Ok(daemon::Reply::Status { serving: false, .. }) => {
+                    debug!("the daemon is turned off, loading a model here");
+                }
                 Ok(daemon::Reply::Status { model, .. }) => {
                     debug!("using the daemon's warm {} model", model);
                     return Ok(Self::Daemon { client, model });
@@ -641,6 +647,14 @@ impl Engine {
                 match client.request(&request).await? {
                     daemon::Reply::Transcribed { result } => Ok(result),
                     daemon::Reply::Error { message } => Err(anyhow::anyhow!(message)),
+                    // Clicked off between `connect` choosing the daemon and
+                    // this request. Named rather than reported as an
+                    // unexpected reply, because it is a thing the user just
+                    // did and not a bug.
+                    daemon::Reply::NotServing => Err(anyhow::anyhow!(
+                        "the daemon was turned off from its tray icon; run this again to \
+                         transcribe without it"
+                    )),
                     other => Err(anyhow::anyhow!("unexpected reply: {:?}", other)),
                 }
             }
@@ -678,6 +692,10 @@ impl Engine {
                         Ok(())
                     }
                     daemon::Reply::Error { message } => Err(anyhow::anyhow!(message)),
+                    daemon::Reply::NotServing => Err(anyhow::anyhow!(
+                        "the daemon was turned off from its tray icon, so there is no warm \
+                         model to switch"
+                    )),
                     other => Err(anyhow::anyhow!("unexpected reply: {:?}", other)),
                 }
             }
@@ -700,6 +718,12 @@ async fn stream_from_daemon(client: &mut daemon::Client) -> Result<String> {
         daemon::Reply::Streaming => {}
         daemon::Reply::AlreadyRecording => {
             anyhow::bail!("the daemon is already recording for something else")
+        }
+        daemon::Reply::NotServing => {
+            anyhow::bail!(
+                "the daemon was turned off from its tray icon; run this again to use an \
+                 in-process model"
+            )
         }
         daemon::Reply::Error { message } => anyhow::bail!(message),
         other => anyhow::bail!("unexpected reply: {:?}", other),

@@ -20,6 +20,13 @@
 //! own in-process engine when no daemon answers, so the daemon is an
 //! optimisation a user opts into at login and never a dependency.
 //!
+//! # Off, without being gone
+//!
+//! A left click on the tray icon turns the daemon off: it releases the model
+//! and answers `NotServing` -- "do it yourself" -- so every front-end goes
+//! back to the in-process path above, while the process and its icon stay for
+//! the click that turns it on again. See `toggle_daemon`.
+//!
 //! # Why the text comes back to the client
 //!
 //! The daemon records, but it deliberately does *not* type the result. Typing
@@ -50,7 +57,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tracing::{debug, error, info, warn};
 use vosk::Model;
 
-use crate::tray::{Tray, TrayState, TrayStyle};
+use crate::tray::{Activity, Tray, TrayState, TrayStyle};
 use crate::vosk_engine::{VoskConfig, VoskEngine, VoskModel, VoskResult};
 use crate::DaemonConfig;
 
@@ -113,8 +120,21 @@ pub enum Reply {
         recording: bool,
         uptime_secs: u64,
         pid: u32,
+        /// False when the daemon has been clicked off in the tray: it is still
+        /// here, but holding no model and taking no work. `model` then names
+        /// what the next click will load rather than what is in memory.
+        serving: bool,
     },
     Started,
+    /// The daemon has been turned off from its tray icon: it holds no model
+    /// and is taking no work, so the front-end should do the job in-process
+    /// exactly as it would with no daemon running at all.
+    ///
+    /// Deliberately not an `Error`. Nothing failed, and a front-end that
+    /// treated this as a failure would refuse to dictate while the daemon was
+    /// off -- turning a daemon that is merely parked into a jambi that is
+    /// broken.
+    NotServing,
     /// A recording was already in progress, so this request did nothing.
     AlreadyRecording,
     /// Nothing was recording, so there was nothing to stop.
@@ -153,10 +173,13 @@ pub enum Reply {
 
 /// The warm model and the config it was loaded from, swapped together by
 /// `SetModel` so the two can never disagree.
-#[derive(Clone)]
+///
+/// `model` is `None` while the daemon is turned off from the tray. The config
+/// stays: it is what names the model in the status and the tooltip, and what
+/// the next click loads.
 struct Loaded {
     config: VoskConfig,
-    model: Arc<Model>,
+    model: Option<Arc<Model>>,
 }
 
 /// Handles on a recording in flight.
@@ -217,10 +240,32 @@ impl State {
             .is_some_and(|session| session.recording.is_running())
     }
 
-    /// Push the current model and recording state to the tray indicator.
+    /// Is the daemon doing a daemon's job -- holding a model and taking work?
     ///
-    /// Called after anything that changes either, so the icon answers "is it
-    /// recording right now?" honestly rather than going stale.
+    /// False only between a click that turned it off and the one that turns it
+    /// back on.
+    async fn is_serving(&self) -> bool {
+        self.loaded.lock().await.model.is_some()
+    }
+
+    /// The warm model and the config it came from, or `None` while the daemon
+    /// is turned off.
+    ///
+    /// Clones both so the caller does not hold the lock across a recognition
+    /// that may run for minutes.
+    async fn warm(&self) -> Option<(VoskConfig, Arc<Model>)> {
+        let loaded = self.loaded.lock().await;
+        loaded
+            .model
+            .clone()
+            .map(|model| (loaded.config.clone(), model))
+    }
+
+    /// Push the current state to the tray indicator.
+    ///
+    /// Called after anything that changes it, so the icon answers "is this
+    /// thing on, and is it recording right now?" honestly rather than going
+    /// stale.
     ///
     /// The two locks are taken one at a time, never nested. The recording
     /// paths below hold `session` while they read `loaded`, so anything that
@@ -228,8 +273,24 @@ impl State {
     /// switch to coincide with a key press.
     async fn refresh_tray(&self) {
         let recording = self.is_recording().await;
+        let loaded = self.loaded.lock().await;
+        let activity = match (&loaded.model, recording) {
+            (None, _) => Activity::Stopped,
+            (Some(_), true) => Activity::Recording,
+            (Some(_), false) => Activity::Idle,
+        };
+        let model = loaded.config.model.to_string();
+        drop(loaded);
+
+        self.tray.set(TrayState { model, activity }).await;
+    }
+
+    /// Show one state outright, for the one that cannot be derived: a model
+    /// being read off disk is "on its way up", which looks exactly like "off"
+    /// in the fields above until the load lands.
+    async fn show_tray(&self, activity: Activity) {
         let model = self.loaded.lock().await.config.model.to_string();
-        self.tray.set(TrayState { model, recording }).await;
+        self.tray.set(TrayState { model, activity }).await;
     }
 }
 
@@ -302,14 +363,23 @@ pub async fn run(vosk_config: VoskConfig, daemon_config: DaemonConfig) -> Result
 
     info!("loading model {}...", vosk_config.model);
     let load_started = Instant::now();
-    let mut engine = VoskEngine::new(vosk_config.clone())?;
-    engine
-        .load_model()
-        .await
-        .context("failed to load the Vosk model")?;
-    let model = engine
-        .loaded_model()
-        .ok_or_else(|| anyhow::anyhow!("model reported loaded but is not present"))?;
+    let model = {
+        let mut engine = VoskEngine::new(vosk_config.clone())?;
+        engine
+            .load_model()
+            .await
+            .context("failed to load the Vosk model")?;
+        // Scoped so the engine is dropped here, which is load-bearing rather
+        // than tidiness: `loaded_model` hands back a *clone* of the `Arc`, so
+        // an engine kept alive for the daemon's lifetime would hold a second
+        // reference to the model -- and the tray's off-click, dropping only
+        // the daemon's own, would free nothing at all. That is exactly what it
+        // did: RSS unmoved across a release, and up by another model's worth
+        // on the click back on.
+        engine
+            .loaded_model()
+            .ok_or_else(|| anyhow::anyhow!("model reported loaded but is not present"))?
+    };
     info!(
         "model {} ready in {}ms",
         vosk_config.model,
@@ -317,6 +387,7 @@ pub async fn run(vosk_config: VoskConfig, daemon_config: DaemonConfig) -> Result
     );
 
     let shutdown = Arc::new(Notify::new());
+    let toggle = Arc::new(Notify::new());
 
     // The indicator is what makes the daemon visible among the other
     // background applications, and the one place a recording still running
@@ -330,9 +401,10 @@ pub async fn run(vosk_config: VoskConfig, daemon_config: DaemonConfig) -> Result
             },
             TrayState {
                 model: vosk_config.model.to_string(),
-                recording: false,
+                activity: Activity::Idle,
             },
             Arc::clone(&shutdown),
+            Arc::clone(&toggle),
         )
         .await
     } else {
@@ -343,7 +415,7 @@ pub async fn run(vosk_config: VoskConfig, daemon_config: DaemonConfig) -> Result
     let state = Arc::new(State {
         loaded: Mutex::new(Loaded {
             config: vosk_config,
-            model,
+            model: Some(model),
         }),
         session: Mutex::new(None),
         max_recording: Duration::from_secs(daemon_config.max_recording_secs),
@@ -351,6 +423,8 @@ pub async fn run(vosk_config: VoskConfig, daemon_config: DaemonConfig) -> Result
         shutdown,
         tray,
     });
+
+    watch_for_tray_clicks(Arc::clone(&state), toggle);
 
     // Caught so that `systemctl --user stop` and Ctrl-C both run the socket
     // guard above instead of leaving the socket behind.
@@ -455,9 +529,10 @@ async fn dispatch(state: &Arc<State>, request: Request) -> Reply {
             // Session before model, and never both at once: see the note on
             // `State::refresh_tray`.
             let recording = state.is_recording().await;
-            let model = state.loaded.lock().await.config.model.to_string();
+            let loaded = state.loaded.lock().await;
             Reply::Status {
-                model,
+                model: loaded.config.model.to_string(),
+                serving: loaded.model.is_some(),
                 recording,
                 uptime_secs: state.started.elapsed().as_secs(),
                 pid: std::process::id(),
@@ -477,8 +552,10 @@ async fn dispatch(state: &Arc<State>, request: Request) -> Reply {
         }
 
         Request::TranscribeFile { path } => {
-            let loaded = state.loaded.lock().await.clone();
-            let engine = VoskEngine::with_model(loaded.config, loaded.model);
+            let Some((config, model)) = state.warm().await else {
+                return Reply::NotServing;
+            };
+            let engine = VoskEngine::with_model(config, model);
             match engine.transcribe_file(&path).await {
                 Ok(result) => Reply::Transcribed { result },
                 Err(e) => Reply::Error {
@@ -519,8 +596,13 @@ async fn start_detached(state: &Arc<State>) -> Reply {
         warn!("discarding a finished recording whose text was never collected");
     }
 
-    let loaded = state.loaded.lock().await.clone();
-    let (recording, result) = spawn_recording(loaded, state.max_recording, None);
+    // Turned off from the tray: the front-end records with its own engine,
+    // exactly as it would with no daemon running at all.
+    let Some((config, model)) = state.warm().await else {
+        return Reply::NotServing;
+    };
+
+    let (recording, result) = spawn_recording(config, model, state.max_recording, None);
     watch_for_completion(Arc::clone(state), recording.clone());
     *slot = Some(Session {
         recording,
@@ -563,6 +645,138 @@ async fn stop_session(state: &State) -> Reply {
     }
 }
 
+/// Act on left clicks of the tray indicator for as long as the daemon runs.
+///
+/// Its own task rather than part of the accept loop, which has to stay free to
+/// answer the socket while a model is being read off disk.
+fn watch_for_tray_clicks(state: Arc<State>, toggle: Arc<Notify>) {
+    tokio::spawn(async move {
+        loop {
+            toggle.notified().await;
+            toggle_daemon(&state).await;
+        }
+    });
+}
+
+/// Turn the daemon off, or back on, on a left click of the tray icon.
+///
+/// Off is not a pause that merely declines work: the warm model is released
+/// and its memory goes back to the system -- 120MB of resident memory for the
+/// small English model, far more for the large ones (see
+/// `release_warm_model`). That is the point of the toggle; a daemon that keeps
+/// its model is the thing one would otherwise just leave running.
+///
+/// What off deliberately keeps is the process, and with it two things:
+///
+///   the icon, because a toggle that removed the icon could not be clicked
+///   back on -- that is "Quit", and it is still in the menu for anyone who
+///   means it;
+///
+///   the socket, so that a second `jambi daemon` still refuses to start,
+///   `jambi daemon status` can report "turned off" rather than "no daemon
+///   running", and front-ends get a straight `NotServing` -- "do it
+///   yourself" -- instead of a connection error.
+///
+/// On loads the model the daemon was configured with, which costs the same
+/// ~800ms (far more for the large models) that the front-ends were paying for
+/// themselves while it was off.
+async fn toggle_daemon(state: &Arc<State>) {
+    if state.is_serving().await {
+        // Any recording in flight goes with it: "off" that leaves the
+        // microphone open is not off. Its text is dropped, and that is the
+        // honest outcome -- a click is not a request for a transcript, and no
+        // front-end is waiting on this one.
+        if let Some(session) = state.session.lock().await.take() {
+            warn!("ending the recording in progress: the daemon was turned off");
+            session.recording.stop.notify_one();
+        }
+
+        release_warm_model(state).await;
+        state.refresh_tray().await;
+        return;
+    }
+
+    // Shown before the load rather than after, because the load is the part
+    // worth reporting: for a large model it is seconds, and an icon that sat
+    // dimmed throughout would read as a click that did nothing.
+    state.show_tray(Activity::Loading).await;
+
+    match load_warm_model(state).await {
+        Ok(model) => info!("turned on: the {} model is warm again", model),
+        // Left off rather than half on: `loaded.model` is untouched on this
+        // path, so the icon goes back to dimmed and the next click tries
+        // again. Only reachable if the model has become unreadable since
+        // startup -- deleted from the cache, or no memory for it.
+        Err(e) => error!("could not load the model, staying off: {:#}", e),
+    }
+
+    state.refresh_tray().await;
+}
+
+/// Drop the warm model and hand its memory back.
+///
+/// The drop is the easy half. Giving the memory back is not: freeing returns
+/// the model's blocks to glibc's free lists, which is not the same as
+/// returning them to the kernel. Measured on the small English model, from an
+/// RSS of 146MB warm:
+///
+///   drop alone                      78MB -- 52MB left on the free lists
+///   drop + malloc_trim              26MB -- the model's memory, returned
+///
+/// Hence the trim. The numbers only hold while the daemon's `Arc` is the last
+/// one; see the scoped engine in `run`, where a second reference once made the
+/// release free nothing whatsoever.
+///
+/// glibc only: `malloc_trim` is a GNU extension, and musl has no equivalent to
+/// call. There the model is still dropped and the daemon still stops serving;
+/// only the moment the pages return to the system is left to the allocator.
+async fn release_warm_model(state: &State) {
+    // Inside the lock, so nothing can see a daemon that still claims to be
+    // serving with the model already gone. A recording that was just told to
+    // stop holds an `Arc` of its own, so the last of it comes back when that
+    // thread winds up rather than here.
+    let mut loaded = state.loaded.lock().await;
+    loaded.model = None;
+
+    #[cfg(target_env = "gnu")]
+    // SAFETY: `malloc_trim` takes no pointers and promises nothing beyond
+    // releasing free memory, so it is safe to call at any point. It returns 1
+    // when it managed to hand something back.
+    let trimmed = unsafe { libc::malloc_trim(0) } == 1;
+    #[cfg(not(target_env = "gnu"))]
+    let trimmed = false;
+
+    info!(
+        "turned off: the {} model is released{}",
+        loaded.config.model,
+        if trimmed {
+            ""
+        } else {
+            " (its memory returns to the system when the allocator decides)"
+        }
+    );
+}
+
+/// Load the configured model and make it the warm one.
+///
+/// Holds the lock across the load for the reason `set_model` does: a request
+/// that arrives mid-load waits, rather than seeing a daemon that is half on.
+async fn load_warm_model(state: &State) -> Result<VoskModel> {
+    let mut loaded = state.loaded.lock().await;
+
+    let mut engine = VoskEngine::new(loaded.config.clone())?;
+    engine
+        .load_model()
+        .await
+        .context("failed to load the Vosk model")?;
+    let model = engine
+        .loaded_model()
+        .ok_or_else(|| anyhow::anyhow!("model reported loaded but is not present"))?;
+
+    loaded.model = Some(model);
+    Ok(loaded.config.model)
+}
+
 /// Load a different model and make it the warm one.
 ///
 /// The load happens inline, holding the lock: a front-end switching language
@@ -570,6 +784,13 @@ async fn stop_session(state: &State) -> Reply {
 /// start against a half-swapped model.
 async fn set_model(state: &State, model: VoskModel) -> Reply {
     let mut loaded = state.loaded.lock().await;
+
+    // Turned off from the tray, so there is no warm model to swap and the
+    // front-end is using its own anyway. Loading one here would turn the
+    // daemon back on behind the user's click.
+    if loaded.model.is_none() {
+        return Reply::NotServing;
+    }
 
     if loaded.config.model == model {
         return Reply::Ok;
@@ -595,7 +816,7 @@ async fn set_model(state: &State, model: VoskModel) -> Reply {
                 // the model it started with.
                 *loaded = Loaded {
                     config,
-                    model: new_model,
+                    model: Some(new_model),
                 };
                 Reply::Ok
             }
@@ -628,8 +849,12 @@ async fn stream_session(
             return Ok(());
         }
 
-        let loaded = state.loaded.lock().await.clone();
-        let (recording, result) = spawn_recording(loaded, state.max_recording, Some(events_tx));
+        let Some((config, model)) = state.warm().await else {
+            send(write, &Reply::NotServing).await?;
+            return Ok(());
+        };
+        let (recording, result) =
+            spawn_recording(config, model, state.max_recording, Some(events_tx));
         *slot = Some(Session {
             recording: recording.clone(),
             result: None,
@@ -746,7 +971,8 @@ async fn pump_stream(
 /// between worker threads. It also keeps the loop off the runtime serving the
 /// socket, so `stop` is answered without waiting on a 10ms poll tick.
 fn spawn_recording(
-    loaded: Loaded,
+    config: VoskConfig,
+    model: Arc<Model>,
     max_recording: Duration,
     events: Option<mpsc::UnboundedSender<Reply>>,
 ) -> (Recording, oneshot::Receiver<Result<String>>) {
@@ -776,7 +1002,10 @@ fn spawn_recording(
         };
 
         let outcome = runtime.block_on(async move {
-            let mut engine = VoskEngine::with_model(loaded.config, loaded.model);
+            // The model it started with, held by this `Arc` for as long as the
+            // recording runs -- so a click that releases the daemon's copy
+            // mid-recording cannot pull the model out from under it.
+            let mut engine = VoskEngine::with_model(config, model);
 
             let stop = async move {
                 tokio::select! {
@@ -979,14 +1208,31 @@ pub async fn print_status() -> Result<()> {
             recording,
             uptime_secs,
             pid,
+            serving,
         } => {
-            println!("🟢 Daemon running (pid {})", pid);
+            // A daemon turned off from the tray is still a running process,
+            // and saying "running" of one that is holding nothing and
+            // answering nothing would be the least useful reading of the
+            // word.
+            if serving {
+                println!("🟢 Daemon running (pid {})", pid);
+            } else {
+                println!("⏸️  Daemon turned off (pid {})", pid);
+            }
             println!("   Socket:  {}", socket_path().display());
-            println!("   Model:   {} (warm)", model);
+            if serving {
+                println!("   Model:   {} (warm)", model);
+            } else {
+                println!("   Model:   {} (released)", model);
+            }
             println!("   Uptime:  {}", format_uptime(uptime_secs));
             println!(
                 "   State:   {}",
-                if recording { "recording" } else { "idle" }
+                match (serving, recording) {
+                    (false, _) => "off - click the tray icon to start it",
+                    (true, true) => "recording",
+                    (true, false) => "idle",
+                }
             );
             Ok(())
         }
@@ -1024,6 +1270,21 @@ mod tests {
 
         let decoded: Request = serde_json::from_str(r#"{"cmd":"ping"}"#).unwrap();
         assert!(matches!(decoded, Request::Ping));
+    }
+
+    /// `NotServing` has to stay a reply of its own rather than collapsing into
+    /// an `Error`: every front-end branches on it to fall back to its own
+    /// engine, and one that read it as a failure would refuse to work while
+    /// the daemon was merely turned off.
+    #[test]
+    fn being_turned_off_is_its_own_reply() {
+        assert_eq!(
+            serde_json::to_string(&Reply::NotServing).unwrap(),
+            r#"{"reply":"not_serving"}"#
+        );
+
+        let decoded: Reply = serde_json::from_str(r#"{"reply":"not_serving"}"#).unwrap();
+        assert!(matches!(decoded, Reply::NotServing));
     }
 
     #[test]
