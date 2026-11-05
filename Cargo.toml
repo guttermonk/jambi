@@ -62,7 +62,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # CLI interface
 clap = { version = "4.4", features = ["derive"], optional = true }
-nix = { version = "0.30.1", features = ["signal"] }
+nix = { version = "0.31.3", features = ["signal"] }
 
 # For `malloc_trim` alone, after the tray's off-click releases the warm model.
 # Already in the tree as a transitive dependency of nix/cpal/tokio, so this
