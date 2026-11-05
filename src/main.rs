@@ -1251,20 +1251,20 @@ async fn test_audio_setup(audio_config: AudioConfig, duration: u64) -> Result<()
 
 /// Download and cache a Vosk model
 async fn download_vosk_model(model_name: &str) -> Result<()> {
-    let model = match model_name {
-        "small-en-us" => VoskModel::SmallEnUs,
-        "large-en-us" => VoskModel::LargeEnUs,
-        "small-cn" => VoskModel::SmallCn,
-        "small-ru" => VoskModel::SmallRu,
-        "small-fr" => VoskModel::SmallFr,
-        "small-de" => VoskModel::SmallDe,
-        "small-es" => VoskModel::SmallEs,
-        _ => {
-            println!("Unknown model: {}", model_name);
-            println!("Available models: small-en-us, large-en-us, small-cn, small-ru, small-fr, small-de, small-es");
-            return Ok(());
-        }
-    };
+    // An error rather than a printed message and Ok: this used to exit 0 on an
+    // unrecognised name, so `jambi download $m && use-it` carried on as though
+    // a model had arrived.
+    let model = VoskModel::from_cli_name(model_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown model: {}\nAvailable models: {}",
+            model_name,
+            VoskModel::ALL
+                .iter()
+                .map(|model| model.cli_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
     
     println!("📥 Downloading Vosk model: {} ({}MB)", model, model.size_mb());
     

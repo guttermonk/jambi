@@ -41,6 +41,61 @@ pub enum VoskModel {
 }
 
 impl VoskModel {
+    /// Every model, in the order they are offered.
+    ///
+    /// The one list. `available_models`, the `models` command, the interactive
+    /// switcher and `from_cli_name` all read it, so a variant added here
+    /// becomes listable and downloadable at once. `jambi download` used to
+    /// keep its own hand-written match of seven names while `jambi models`
+    /// advertised twelve, so five of the models it listed could not be
+    /// fetched.
+    pub const ALL: [VoskModel; 12] = [
+        VoskModel::SmallEnUs,
+        VoskModel::LargeEnUs,
+        VoskModel::SmallEnIn,
+        VoskModel::SmallCn,
+        VoskModel::SmallRu,
+        VoskModel::SmallFr,
+        VoskModel::SmallDe,
+        VoskModel::SmallEs,
+        VoskModel::SmallPt,
+        VoskModel::SmallIt,
+        VoskModel::SmallNl,
+        VoskModel::SmallJa,
+    ];
+
+    /// The short name `jambi download` takes, as opposed to the full directory
+    /// name `Display` prints.
+    ///
+    /// A match rather than string surgery on `model_name`, so that adding a
+    /// variant fails to compile until it has a name here.
+    pub fn cli_name(&self) -> &'static str {
+        match self {
+            VoskModel::SmallEnUs => "small-en-us",
+            VoskModel::LargeEnUs => "large-en-us",
+            VoskModel::SmallEnIn => "small-en-in",
+            VoskModel::SmallCn => "small-cn",
+            VoskModel::SmallRu => "small-ru",
+            VoskModel::SmallFr => "small-fr",
+            VoskModel::SmallDe => "small-de",
+            VoskModel::SmallEs => "small-es",
+            VoskModel::SmallPt => "small-pt",
+            VoskModel::SmallIt => "small-it",
+            VoskModel::SmallNl => "small-nl",
+            VoskModel::SmallJa => "small-ja",
+        }
+    }
+
+    /// Look a model up by the name the CLI accepts.
+    ///
+    /// The full directory name is taken too -- `jambi models` prints those, so
+    /// pasting one back is the obvious thing to try, and it used to fail.
+    pub fn from_cli_name(name: &str) -> Option<VoskModel> {
+        VoskModel::ALL
+            .into_iter()
+            .find(|model| model.cli_name() == name || model.model_name() == name)
+    }
+
     /// Get the download URL for the model
     pub fn download_url(&self) -> &'static str {
         match self {
@@ -904,20 +959,7 @@ impl VoskEngine {
     
     /// Get available models
     pub fn available_models() -> Vec<VoskModel> {
-        vec![
-            VoskModel::SmallEnUs,
-            VoskModel::LargeEnUs,
-            VoskModel::SmallEnIn,
-            VoskModel::SmallCn,
-            VoskModel::SmallRu,
-            VoskModel::SmallFr,
-            VoskModel::SmallDe,
-            VoskModel::SmallEs,
-            VoskModel::SmallPt,
-            VoskModel::SmallIt,
-            VoskModel::SmallNl,
-            VoskModel::SmallJa,
-        ]
+        VoskModel::ALL.to_vec()
     }
     
     /// Stream from the default input device, feeding Vosk as the audio arrives,
@@ -1140,7 +1182,45 @@ impl VoskEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    /// Everything the `models` command lists can also be downloaded.
+    ///
+    /// This is the invariant that broke: `jambi download` carried its own
+    /// match of seven names against the twelve `available_models` advertised,
+    /// so five listed models were unfetchable and nothing noticed. Both read
+    /// `ALL` now, and this fails if a name is ever unreachable again.
+    #[test]
+    fn every_listed_model_can_be_looked_up_by_name() {
+        for model in VoskEngine::available_models() {
+            assert_eq!(
+                VoskModel::from_cli_name(model.cli_name()),
+                Some(model),
+                "{} is listed but its cli name does not resolve",
+                model
+            );
+            // The full name is what `jambi models` prints, so it has to work
+            // when pasted back.
+            assert_eq!(
+                VoskModel::from_cli_name(model.model_name()),
+                Some(model),
+                "{} is listed but its full name does not resolve",
+                model
+            );
+        }
+        assert_eq!(VoskEngine::available_models().len(), VoskModel::ALL.len());
+        assert_eq!(VoskModel::from_cli_name("no-such-model"), None);
+    }
+
+    /// Two models sharing a name would make one of them unreachable.
+    #[test]
+    fn model_cli_names_are_distinct() {
+        let mut names: Vec<_> = VoskModel::ALL.iter().map(|m| m.cli_name()).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "duplicate cli name among models");
+    }
+
     #[test]
     fn test_vosk_model_properties() {
         let model = VoskModel::SmallEnUs;
