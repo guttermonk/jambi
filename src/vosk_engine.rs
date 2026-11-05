@@ -271,13 +271,12 @@ fn decode_other(path: &Path, header: &[u8]) -> Result<Pcm> {
 /// report the rate honestly.
 #[cfg(feature = "formats")]
 fn decode_with_symphonia(path: &Path) -> Result<Pcm> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
     use symphonia::core::errors::Error as SymphoniaError;
-    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
 
     let file = std::fs::File::open(path)
         .with_context(|| format!("cannot open {}", path.display()))?;
@@ -290,55 +289,60 @@ fn decode_with_symphonia(path: &Path) -> Result<Pcm> {
         hint.with_extension(extension);
     }
 
-    let probed = symphonia::default::get_probe().format(
+    // Returns the reader directly in 0.6, where 0.5 wrapped it in a
+    // ProbeResult, and takes the options by value rather than by reference.
+    let mut format = symphonia::default::get_probe().probe(
         &hint,
         stream,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
+        FormatOptions::default(),
+        MetadataOptions::default(),
     )?;
-    let mut format = probed.format;
 
+    // 0.6 types codec parameters per track kind, so the audio track is asked
+    // for by type instead of being picked out by comparing its codec against
+    // CODEC_TYPE_NULL, which no longer exists. The parameters are cloned
+    // because this borrow of `format` has to end before next_packet below can
+    // borrow it mutably.
     let track = format
-        .tracks()
-        .iter()
-        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .default_track(TrackType::Audio)
         .ok_or_else(|| anyhow::anyhow!("no audio track"))?;
     let track_id = track.id;
-    let mut decoder =
-        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|params| params.audio())
+        .ok_or_else(|| anyhow::anyhow!("audio track has no codec parameters"))?
+        .clone();
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())?;
 
     let mut interleaved: Vec<i16> = Vec::new();
-    let mut buffer: Option<SampleBuffer<i16>> = None;
+    // Scratch space reused across packets. copy_to_vec_interleaved resizes its
+    // destination rather than appending to it, so the samples land here first
+    // and are then pushed onto the end of `interleaved`.
+    let mut packet_samples: Vec<i16> = Vec::new();
     let mut channels = 0u16;
     let mut sample_rate = 0u32;
 
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            // How symphonia reports a clean end of stream.
-            Err(SymphoniaError::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        if packet.track_id() != track_id {
+    // next_packet reports a clean end of stream as Ok(None) in 0.6. In 0.5 it
+    // surfaced as an UnexpectedEof io error that the caller had to recognise
+    // and treat as success, which is why this loop used to be a `loop` with a
+    // match on the error kind.
+    while let Some(packet) = format.next_packet()? {
+        // A field in 0.6 rather than the accessor 0.5 had.
+        if packet.track_id != track_id {
             continue;
         }
 
         match decoder.decode(&packet) {
             Ok(decoded) => {
-                let spec = *decoded.spec();
-                channels = spec.channels.count() as u16;
-                sample_rate = spec.rate;
+                let spec = decoded.spec();
+                channels = spec.channels().count() as u16;
+                sample_rate = spec.rate();
 
-                let buffer = buffer.get_or_insert_with(|| {
-                    SampleBuffer::<i16>::new(decoded.capacity() as u64, spec)
-                });
-                buffer.copy_interleaved_ref(decoded);
-                interleaved.extend_from_slice(buffer.samples());
+                decoded.copy_to_vec_interleaved(&mut packet_samples);
+                interleaved.extend_from_slice(&packet_samples);
             }
             // Both are documented as recoverable: skip the packet, keep going.
             // Bailing here would throw away an otherwise good recording over
