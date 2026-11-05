@@ -1,8 +1,13 @@
 name: CI
 
+# Topic branches are listed alongside main because the workflow here is to cut a
+# named branch, verify on it, then fast-forward -- and with only main and
+# pull_request as triggers, a branch pushed without a PR got no run at all, so
+# the verify step was quietly a no-op. Opening a PR against your own repo purely
+# to make CI fire is the wrong shape; this makes the branch push enough.
 on:
   push:
-    branches: [main]
+    branches: [main, 'deps/**', 'security/**']
   pull_request:
 
 # Nothing here writes to the repo or reads a secret, so the token stays
@@ -11,12 +16,16 @@ on:
 permissions:
   contents: read
 
-# A second push to a PR makes the first run's result irrelevant, so cancel it.
-# Pushes to main are left to finish: the per-commit result there is the record
-# of what last built, and cancelling would leave gaps in it.
+# A second push to a PR or a topic branch makes the first run's result
+# irrelevant, so cancel it. Keyed on the ref rather than the event now that
+# topic branches trigger too -- `event_name == 'pull_request'` would have left
+# superseded branch runs going.
+#
+# main is the exception and is left to finish: the per-commit result there is
+# the record of what last built, and cancelling would leave gaps in it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # The package build is the gate, and deliberately the only one. buildRustPackage
