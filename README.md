@@ -38,12 +38,12 @@ If you like the project, please show your support by leaving a star. Thanks!
 
 **On Ubuntu/Debian:**
 ```bash
-sudo apt-get install libasound2-dev libssl-dev build-essential
+sudo apt-get install libasound2-dev build-essential
 ```
 
 **On Fedora:**
 ```bash
-sudo dnf install alsa-lib-devel openssl-devel
+sudo dnf install alsa-lib-devel gcc make
 ```
 
 **On NixOS:** See the [NixOS Installation](#nixos-installation) section below.
@@ -55,7 +55,7 @@ sudo dnf install alsa-lib-devel openssl-devel
 **Prereqs for building from source:**
 - Rust 1.89+ (install from [rustup.rs](https://rustup.rs/))
 - ALSA development libraries (Linux)
-- OpenSSL development libraries
+- A C compiler and `make` (for the ALSA, Vosk and TLS bindings)
 
 1. Clone the repository:
 ```bash

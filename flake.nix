@@ -45,11 +45,17 @@
           jack2
           
           # System libraries
-          openssl
+          #
+          # No openssl: reqwest 0.13 moved to rustls, so nothing in the tree
+          # links it any more -- openssl-sys is gone from Cargo.lock entirely.
+          # TLS now comes from aws-lc-rs via rustls, which builds from vendored
+          # source rather than wanting a system library here.
+          #
+          # No bzip2 either: it came in through zip's default features, which
+          # the security bump turned off in favour of deflate alone.
           pkg-config
           stdenv.cc.cc
-          bzip2
-          
+
           # Runtime dependencies
           sox
           wl-clipboard

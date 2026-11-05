@@ -81,10 +81,11 @@ ksni = { version = "0.3.6", default-features = false, features = ["tokio"], opti
 # position of only working if the host happens to have the right tool built
 # the right way.
 #
-# 0.5 rather than 0.6 for no reason that still holds: it was chosen for an MSRV
-# of 1.53 against 0.6's 1.85, to keep a "Rust 1.70+" README claim true. The zip
-# security bump put the floor at 1.89 regardless, so 0.6 is available whenever
-# someone wants to look at what it changes.
+# 0.6 since the MSRV floor moved to 1.89 and stopped standing in the way; it
+# was held at 0.5 to keep a "Rust 1.70+" README claim true against 0.6's 1.85.
+# The move was not mechanical -- see decode_with_symphonia, where 0.6 renamed
+# the probe and codec registry entry points and made next_packet report end of
+# stream as Ok(None).
 #
 # Only the formats worth carrying. `isomp4`/`aac`/`alac` are the point of the
 # exercise -- phones record m4a -- and the rest come close to free.
