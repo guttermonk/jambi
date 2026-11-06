@@ -12,9 +12,10 @@ use vosk::{Model, Recognizer, DecodingState};
 
 
 /// Vosk model variants with their download URLs and sizes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VoskModel {
     /// Small English model (40MB) - fastest, good accuracy
+    #[default]
     SmallEnUs,
     /// Large English model (1.8GB) - best accuracy
     LargeEnUs,
@@ -186,11 +187,6 @@ impl VoskModel {
     }
 }
 
-impl Default for VoskModel {
-    fn default() -> Self {
-        VoskModel::SmallEnUs
-    }
-}
 
 impl std::fmt::Display for VoskModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -668,7 +664,7 @@ impl VoskEngine {
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
             
-            if downloaded % (10 * 1024 * 1024) == 0 {
+            if downloaded.is_multiple_of(10 * 1024 * 1024) {
                 let progress = (downloaded as f64 / total_size as f64) * 100.0;
                 info!("Download progress: {:.1}%", progress);
             }
@@ -1039,8 +1035,8 @@ impl VoskEngine {
         // Create recognizer with streaming configuration
         let mut recognizer = Recognizer::new(model, 16000.0)
             .ok_or_else(|| anyhow::anyhow!("Failed to create recognizer"))?;
-        let _ = recognizer.set_max_alternatives(0);
-        let _ = recognizer.set_words(true);
+        recognizer.set_max_alternatives(0);
+        recognizer.set_words(true);
 
         let mut full_text = String::new();
         let mut last_partial = String::new();

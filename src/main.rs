@@ -16,7 +16,6 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn, error};
 
 mod audio;
-mod config;
 mod daemon;
 mod dictate;
 mod tray;
@@ -1170,7 +1169,7 @@ async fn list_models(detailed: bool) -> Result<()> {
 
     if detailed {
         println!("Available Vosk Models:");
-        println!("{:<30} {:<10} {:<15} {}", "Model", "Size", "Language", "Description");
+        println!("{:<30} {:<10} {:<15} Description", "Model", "Size", "Language");
         println!("{}", "-".repeat(80));
         
         for model in models {
@@ -1527,9 +1526,8 @@ fn format_as_json(results: &[(PathBuf, vosk_engine::VoskResult)]) -> Result<Stri
 /// Format results as SRT subtitles
 fn format_as_srt(results: &[(PathBuf, vosk_engine::VoskResult)]) -> Result<String> {
     let mut output = String::new();
-    let mut segment_id = 1;
-    
-    for (file, result) in results {
+
+    for (segment_id, (file, result)) in (1..).zip(results.iter()) {
         if results.len() > 1 {
             output.push_str(&format!("// File: {}\n\n", file.display()));
         }
@@ -1542,9 +1540,8 @@ fn format_as_srt(results: &[(PathBuf, vosk_engine::VoskResult)]) -> Result<Strin
             "00:00:10,000", // Assume 10 seconds if no timing info
             result.text
         ));
-        segment_id += 1;
     }
-    
+
     Ok(output)
 }
 

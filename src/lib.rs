@@ -45,7 +45,6 @@ use anyhow::Result;
 use std::path::Path;
 
 pub mod audio;
-pub mod config;
 pub mod vosk_engine;
 
 // Clipboard functionality
@@ -161,7 +160,6 @@ pub fn copy_to_clipboard_nonblocking(text: &str) -> anyhow::Result<()> {
 // Re-export main types for convenience
 pub use audio::{AudioRecorder, AudioConfig, RecordingInfo, RecordingState};
 pub use vosk_engine::{VoskEngine, VoskConfig, VoskModel};
-pub use config::*;
 
 
 
@@ -474,6 +472,6 @@ mod tests {
         println!("Best device: {:?}", device);
         
         // Device should return a string description
-        assert!(device.len() > 0);
+        assert!(!device.is_empty());
     }
 }

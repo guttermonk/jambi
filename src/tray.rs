@@ -820,7 +820,7 @@ mod tests {
     fn no_glyph_is_blank_or_solid() {
         for icon in ICONS {
             let rendered = imp::test_icon(icon, 32);
-            let opaque = rendered.data.chunks_exact(4).filter(|p| p[0] > 128).count();
+            let opaque = rendered.data.as_chunks::<4>().0.iter().filter(|p| p[0] > 128).count();
             let total = (rendered.width * rendered.height) as usize;
             assert!(opaque > total / 50, "{icon:?} is nearly blank: {opaque} px");
             assert!(
@@ -1080,7 +1080,7 @@ mod tests {
             let weight = |activity| {
                 imp::test_icon_for(style, activity, 32)
                     .data
-                    .chunks_exact(4)
+                    .as_chunks::<4>().0.iter()
                     .map(|pixel| pixel[0] as u64)
                     .sum::<u64>()
             };

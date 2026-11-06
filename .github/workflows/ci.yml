@@ -67,11 +67,11 @@ jobs:
   # `nix build` -- including a user's `nix run github:guttermonk/jambi` -- pay
   # for a lint it has no use for.
   #
-  # Not `-D warnings`. The tree currently has 109 clippy warnings, 91 of them
-  # `uninlined_format_args`, so failing on warnings would make this job red on
-  # arrival and train everyone to ignore it. It reports instead; add
-  # `-- -D warnings` here once that backlog is cleared. Most of it is machine
-  # fixable: `cargo clippy --fix --all-targets --all-features`.
+  # `-D warnings` now that the tree is clean. It reported only, while a backlog
+  # stood in the way -- 109 warnings when that was written, of which 91 were
+  # `uninlined_format_args` that stopped firing by themselves when the toolchain
+  # moved from 1.88 to 1.99. The 22 that were actually there are gone, so the
+  # job can fail on a new one instead of burying it among the old.
   clippy:
     runs-on: ubuntu-latest
     steps:
@@ -102,7 +102,7 @@ jobs:
       # LD_LIBRARY_PATH but never touches VOSK_LIB_DIR.
       - run: |
           export VOSK_LIB_DIR="$HOME/.cache/vosk"
-          nix develop --fallback --command cargo clippy --all-targets --all-features
+          nix develop --fallback --command cargo clippy --all-targets --all-features -- -D warnings
 
   # No rustfmt job. .rustfmt.toml does not currently parse on stable -- `verbose`
   # expects a string, not a boolean -- and once that is fixed, roughly half the

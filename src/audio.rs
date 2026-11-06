@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleRate, Stream, StreamConfig, BufferSize};
 use std::sync::{Arc, Mutex};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use chrono::Utc;
 use hound::{WavSpec, WavWriter};
 use std::io::BufWriter;
@@ -497,7 +497,6 @@ impl AudioRecorder {
                                     info!("Maximum recording duration reached");
                                 }
                                 *state_clone.lock().unwrap() = RecordingState::Stopping;
-                                return;
                             }
                         }
                     }
@@ -684,7 +683,7 @@ fn generate_recording_id() -> String {
 }
 
 /// Extract recording ID from file path
-fn extract_id_from_path(path: &PathBuf) -> Result<String> {
+fn extract_id_from_path(path: &Path) -> Result<String> {
     let filename = path.file_name()
         .and_then(|name| name.to_str())
         .context("Invalid file path")?;
