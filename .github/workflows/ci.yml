@@ -1,13 +1,15 @@
 name: CI
 
-# Topic branches are listed alongside main because the workflow here is to cut a
-# named branch, verify on it, then fast-forward -- and with only main and
-# pull_request as triggers, a branch pushed without a PR got no run at all, so
-# the verify step was quietly a no-op. Opening a PR against your own repo purely
-# to make CI fire is the wrong shape; this makes the branch push enough.
+# Every branch, not a list of prefixes. The workflow here is to cut a named
+# branch, verify on it, then fast-forward, and with only main and pull_request
+# as triggers a branch pushed without a PR got no run at all -- the verify step
+# was quietly a no-op. A prefix list fixed that only for the prefixes someone
+# had thought of: `deps/**` and `security/**` were in it and `cleanup/**` was
+# not, which went unnoticed until the next branch was cut. `**` has nothing to
+# keep in sync.
 on:
   push:
-    branches: [main, 'deps/**', 'security/**']
+    branches: ['**']
   pull_request:
 
 # Nothing here writes to the repo or reads a secret, so the token stays
