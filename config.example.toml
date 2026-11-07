@@ -122,18 +122,25 @@ tray = true
 # Try either without editing this file: `jambi daemon --icon microphone`.
 tray_icon = "lamp"
 
-# The ink the indicator is drawn in. Nothing can reliably read your panel's
-# color, so this is a setting rather than something detected:
+# The ink the indicator is drawn in:
 #
-#   "white" - near-white, for a dark panel (the default)
+#   "auto"  - follow the desktop's colour scheme (the default)
+#   "white" - near-white, for a dark panel
 #   "black" - near-black, for a light panel
+#
+# "auto" reads org.freedesktop.portal.Settings and keeps listening, so the
+# glyph moves when you switch between a light and a dark theme -- no restart,
+# and nothing to set per machine. Where no portal answers it stays white.
+#
+# Setting white or black pins it and stops the watching: an ink you asked for
+# is a decision already made, and the desktop does not get to overrule it.
 #
 # "dark" and "light" are accepted as aliases naming the panel instead of the
 # ink, so `tray_color = "dark"` means the same as "white". Recording stays red
 # either way -- that reports state, not theme.
 #
-# Try either with `jambi daemon --color black`.
-tray_color = "white"
+# Try any of them with `jambi daemon --color black`.
+tray_color = "auto"
 
 # Turn the indicator red while a recording is in progress.
 #

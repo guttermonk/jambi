@@ -50,8 +50,17 @@ pub enum TrayIcon {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum TrayColor {
-    /// Near-white, for a dark panel.
+    /// Follow the desktop's colour scheme, and keep following it.
+    ///
+    /// The default, because no fixed ink is right on both a light and a dark
+    /// panel, and a tray icon is the one piece of an application that lives on
+    /// someone else's background. Resolved through
+    /// org.freedesktop.portal.Settings at startup and again whenever the
+    /// scheme changes, so switching desktop themes moves the glyph with no
+    /// restart. Falls back to White wherever no portal answers.
     #[default]
+    Auto,
+    /// Near-white, for a dark panel.
     #[serde(alias = "dark")]
     White,
     /// Near-black, for a light panel.
@@ -59,8 +68,13 @@ pub enum TrayColor {
     Black,
 }
 
-/// How the indicator looks. Comes from config and does not change while the
-/// daemon runs, which is why it is kept apart from the `TrayState` below.
+/// How the indicator looks.
+///
+/// `color` is the one field that moves while the daemon runs: TrayColor::Auto
+/// is re-resolved from the colour-scheme portal on every change. The rest comes
+/// from config and is fixed, which is why this is still kept apart from the
+/// `TrayState` below -- state is what the daemon is doing, this is how it
+/// looks.
 #[cfg_attr(not(feature = "tray"), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub struct TrayStyle {
@@ -279,6 +293,23 @@ mod imp {
             shutdown: Arc<Notify>,
             toggle: Arc<Notify>,
         ) -> Self {
+            // Only Auto talks to the portal. An explicitly configured ink is a
+            // decision already made, and asking the desktop to confirm it would
+            // make `tray_color = "white"` mean something other than white.
+            let follow_scheme = style.color == TrayColor::Auto;
+            let conn = if follow_scheme {
+                zbus::Connection::session().await.ok()
+            } else {
+                None
+            };
+
+            let mut style = style;
+            if let Some(conn) = &conn {
+                if let Some(ink) = read_scheme(conn).await.and_then(ink_for_scheme) {
+                    style.color = ink;
+                }
+            }
+
             let tray = JambiTray {
                 style,
                 state,
@@ -294,6 +325,9 @@ mod imp {
             match tray.assume_sni_available(true).spawn().await {
                 Ok(handle) => {
                     info!("tray indicator registered");
+                    if let Some(conn) = conn {
+                        Self::watch_scheme(conn, handle.clone());
+                    }
                     Self(Some(handle))
                 }
                 Err(e) => {
@@ -301,6 +335,67 @@ mod imp {
                     Self(None)
                 }
             }
+        }
+
+        /// Repaint the glyph whenever the desktop's colour scheme moves.
+        ///
+        /// This is what makes the icon a themed one rather than a picture. The
+        /// StatusNotifierItem specification offers IconName, which would let
+        /// the host resolve and recolour -- but jambi's glyphs are its own and
+        /// not in any icon theme, so it supplies IconPixmap and the pixels are
+        /// already coloured when the host receives them. Nothing downstream can
+        /// adapt them, which left the ink at whatever it was when the daemon
+        /// started. Watching the scheme and re-rendering is the equivalent
+        /// move for an application that draws its own.
+        ///
+        /// Detached rather than joined: it lives as long as the connection, and
+        /// the daemon's shutdown path drops that. A failure to subscribe is not
+        /// fatal -- the icon simply stops following, which is where it was
+        /// before this existed.
+        fn watch_scheme(conn: zbus::Connection, handle: ksni::Handle<JambiTray>) {
+            tokio::spawn(async move {
+                use futures_util::StreamExt as _;
+
+                let mut stream = match zbus::MessageStream::for_match_rule(
+                    zbus::MatchRule::builder()
+                        .msg_type(zbus::message::Type::Signal)
+                        .interface("org.freedesktop.portal.Settings")
+                        .unwrap()
+                        .member("SettingChanged")
+                        .unwrap()
+                        .build(),
+                    &conn,
+                    None,
+                )
+                .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        debug!("colour-scheme signal unavailable ({e}); icon will not follow");
+                        return;
+                    }
+                };
+
+                while let Some(Ok(msg)) = stream.next().await {
+                    // Re-reading rather than decoding the signal body: the
+                    // signal says a setting changed, and one round trip is
+                    // cheaper to get right than parsing the namespace, key and
+                    // doubly-wrapped value out of every setting the desktop
+                    // happens to touch.
+                    let _ = msg;
+                    let Some(ink) = read_scheme(&conn).await.and_then(ink_for_scheme) else {
+                        continue;
+                    };
+                    if handle
+                        .update(move |tray| tray.style.color = ink)
+                        .await
+                        .is_none()
+                    {
+                        debug!("tray service is gone, stopping the colour-scheme watch");
+                        return;
+                    }
+                }
+            });
         }
 
         /// Replace what the indicator shows. Silently does nothing when there
@@ -335,10 +430,54 @@ mod imp {
         match color {
             // Near-white rather than pure, matching the notification glyph in
             // `assets/`, which reads on the dark panel a tray usually sits on.
-            TrayColor::White => ([0xEC, 0xEF, 0xF4], [0xE5, 0x4B, 0x4B]),
+            // Auto lands here only if it was never resolved -- `resolve` turns
+            // it into one of the two below before anything is drawn -- so this
+            // arm is the no-portal fallback rather than a real appearance.
+            TrayColor::White | TrayColor::Auto => ([0xEC, 0xEF, 0xF4], [0xE5, 0x4B, 0x4B]),
             // Near-black rather than pure, which sits heavily beside themed
             // panel icons, with a deeper red to match.
             TrayColor::Black => ([0x2E, 0x34, 0x40], [0xC0, 0x39, 0x2B]),
+        }
+    }
+
+    /// The ink a colour scheme asks for.
+    ///
+    /// The portal reports what the DESKTOP is, and the glyph has to be the
+    /// opposite: a dark panel needs light ink. 1 is prefer-dark and 2 is
+    /// prefer-light, per org.freedesktop.appearance; 0 is "no preference",
+    /// which is not a third appearance to draw, so it keeps the fallback.
+    fn ink_for_scheme(scheme: u32) -> Option<TrayColor> {
+        match scheme {
+            1 => Some(TrayColor::White),
+            2 => Some(TrayColor::Black),
+            _ => None,
+        }
+    }
+
+    /// Ask the colour-scheme portal once.
+    ///
+    /// Every failure here is the same answer -- None, keep the fallback --
+    /// because none of them are worth a louder reaction: a desktop with no
+    /// portal, a portal without the appearance namespace, and a malformed
+    /// reply all mean the same thing to a tray icon.
+    async fn read_scheme(conn: &zbus::Connection) -> Option<u32> {
+        let reply = conn
+            .call_method(
+                Some("org.freedesktop.portal.Desktop"),
+                "/org/freedesktop/portal/desktop",
+                Some("org.freedesktop.portal.Settings"),
+                "Read",
+                &("org.freedesktop.appearance", "color-scheme"),
+            )
+            .await
+            .ok()?;
+        // Doubly wrapped: Read returns a variant, and the stored value is
+        // itself a variant, so this is v<v<u>> and not the u it looks like.
+        let outer: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
+        let inner = zbus::zvariant::Value::from(outer);
+        match inner {
+            zbus::zvariant::Value::Value(v) => u32::try_from(*v).ok(),
+            other => u32::try_from(other).ok(),
         }
     }
 

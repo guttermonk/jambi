@@ -228,7 +228,7 @@ Appearance is chosen under `[daemon]`:
 ```toml
 [daemon]
 tray_icon = "lamp"              # or "microphone"
-tray_color = "white"            # or "black" for a light panel
+tray_color = "auto"             # follows the desktop; or "white" / "black"
 tray_red_when_recording = true  # false to keep one color throughout
 ```
 
@@ -237,11 +237,23 @@ tray_red_when_recording = true  # false to keep one color throughout
 and unadorned, so every pixel goes to the shape itself; being wider than it is
 tall, it fills the width of the icon slot and rather less of the height.
 
-`tray_color` is the ink: `white` for a dark panel, `black` for a light one.
-Nothing can reliably read your panel's color, so it is a setting rather than
-something detected; `"dark"` and `"light"` are accepted as aliases naming the
-panel instead of the ink, so `tray_color = "dark"` means the same as
-`"white"`.
+`tray_color` is the ink, and defaults to `auto`: Jambi reads the desktop's
+colour scheme from `org.freedesktop.portal.Settings` and keeps listening, so
+the glyph follows a switch between light and dark themes without a restart.
+Where no portal answers it falls back to white.
+
+Setting `white` or `black` pins it and stops the watching -- an ink you asked
+for is not something the desktop should overrule. `"dark"` and `"light"` are
+accepted as aliases naming the panel instead of the ink, so `tray_color =
+"dark"` means the same as `"white"`.
+
+Worth knowing why this needs watching at all, since most tray icons get it for
+free: the StatusNotifierItem protocol lets an application publish an icon
+*name* and leave resolving and recolouring to the panel, which is how a themed
+icon follows along by itself. Jambi's glyphs are its own and in no icon theme,
+so it publishes finished pixels instead -- and pixels cannot be recoloured by
+anything downstream. Watching the scheme is the equivalent move for an
+application that draws its own.
 
 `tray_red_when_recording` is the color change itself. Leaving it on is worth
 it -- the red is the only at-a-glance sign that a dictation whose key release

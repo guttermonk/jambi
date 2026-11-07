@@ -141,8 +141,9 @@ enum Commands {
         #[arg(long, value_enum)]
         icon: Option<TrayIcon>,
 
-        /// Tray ink, overriding `daemon.tray_color`. `white` suits a dark
-        /// panel, `black` a light one
+        /// Tray ink, overriding `daemon.tray_color`. `auto` follows the
+        /// desktop's colour scheme, `white` suits a dark panel, `black` a
+        /// light one
         #[arg(long, value_enum)]
         color: Option<TrayColor>,
 

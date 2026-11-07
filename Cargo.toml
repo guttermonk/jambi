@@ -75,6 +75,16 @@ libc = "0.2"
 # and nothing extra for the Nix build to find on the host.
 ksni = { version = "0.3.6", default-features = false, features = ["tokio"], optional = true }
 
+# Reading the desktop's colour scheme, so the tray glyph can follow a
+# light/dark switch instead of being whatever ink the config named at startup.
+# org.freedesktop.portal.Settings is the cross-desktop answer and carries a
+# change signal, so there is nothing to poll.
+#
+# No new closure: ksni already pulls zbus for the StatusNotifierItem protocol,
+# and this is the same version it resolved. Tied to the same feature, since
+# without a tray there is nothing to recolour.
+zbus = { version = "5", default-features = false, features = ["tokio"], optional = true }
+
 # Decoding for audio files that are not WAV. Pure Rust, so it compiles in
 # rather than becoming a runtime dependency on ffmpeg -- which would be a
 # ~100MB closure next to a 40MB model, and would put jambi back in the
@@ -126,5 +136,5 @@ formats = ["dep:symphonia"]
 # Tray indicator for `jambi daemon`. On by default because a daemon you cannot
 # see is a daemon you cannot tell is running; turn it off for a headless build,
 # or leave it on and set `tray = false` under [daemon] to decide at runtime.
-tray = ["dep:ksni"]
+tray = ["dep:ksni", "dep:zbus"]
 # openai = ["dep:reqwest"]  # Enable when needed
