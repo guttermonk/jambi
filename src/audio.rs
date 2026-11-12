@@ -605,37 +605,33 @@ impl AudioRecorder {
 
 
     /// Record audio until Enter key is pressed or timeout
+    ///
+    /// Delegates to start_recording/stop_recording rather than reaching for
+    /// start_sox_recording itself. It used to do the latter unconditionally,
+    /// which made sox a hard requirement on the one path `jambi record`
+    /// actually takes: without it the run died with "Failed to start sox
+    /// process" instead of using CPAL, despite new() having already logged
+    /// "sox not found, falling back to CPAL". The CPAL half of
+    /// start_recording was unreachable for the same reason.
     pub async fn record_audio(&mut self) -> Result<RecordingInfo> {
         println!("🔴 Recording...");
         println!("⚠️ Press Enter to stop");
 
-        // Generate recording path
-        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let recording_id = generate_recording_id();
-        let filename = format!("recording_{}_{}.wav", timestamp, recording_id);
-        let file_path = self.config.output_dir.join(filename);
-        
-        // Ensure output directory exists
-        std::fs::create_dir_all(&self.config.output_dir)
-            .context("Failed to create output directory")?;
-        
-        // Set start time and state before starting recording
-        *self.start_time.lock().unwrap() = Some(Instant::now());
-        *self.state.lock().unwrap() = RecordingState::Recording;
-        
-        // Start sox recording
-        self.start_sox_recording(file_path).await?;
-        
-        // Give sox a moment to initialize and start writing
-        sleep(Duration::from_secs(1)).await;
-        
-        // Verify sox is actually running
-        if let Some(ref process) = self.sox_process {
-            if self.config.verbose {
-                info!("Sox process started with PID: {:?}", process.id());
+        // Generates the path and id, sets start time and state, and picks the
+        // backend.
+        self.start_recording().await?;
+
+        if self.backend == RecordingBackend::Sox {
+            // Give sox a moment to initialize and start writing
+            sleep(Duration::from_secs(1)).await;
+
+            if let Some(ref process) = self.sox_process {
+                if self.config.verbose {
+                    info!("Sox process started with PID: {:?}", process.id());
+                }
             }
         }
-        
+
         // Set up channel to wait for Enter key
         let (tx, rx) = tokio::sync::oneshot::channel();
         
@@ -653,18 +649,16 @@ impl AudioRecorder {
                 if self.config.verbose {
                     info!("User pressed Enter, stopping recording");
                 }
-                let recording_info = self.stop_sox_recording().await?;
-                *self.state.lock().unwrap() = RecordingState::Idle;
-                Ok(recording_info)
+                // stop_recording sets the state back to Idle itself, for either
+                // backend.
+                self.stop_recording().await
             }
             _ = sleep(Duration::from_secs(self.config.max_duration.unwrap_or(300))) => {
                 // Timeout reached - stop recording
                 if self.config.verbose {
                     info!("Max duration reached, stopping recording");
                 }
-                let recording_info = self.stop_sox_recording().await?;
-                *self.state.lock().unwrap() = RecordingState::Idle;
-                Ok(recording_info)
+                self.stop_recording().await
             }
         }
     }
@@ -818,3 +812,4 @@ mod tests {
         // Recorder created successfully
     }
 }
+
