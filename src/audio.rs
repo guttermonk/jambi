@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Host, SampleRate, Stream, StreamConfig, BufferSize};
+use cpal::{Device, Host, Stream, StreamConfig, BufferSize};
 use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 use chrono::Utc;
@@ -121,7 +121,7 @@ impl AudioRecorder {
             let host = cpal::default_host();
             match host.default_input_device() {
                 Some(device) => {
-                    let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+                    let name = device_name(&device);
                     Ok(format!("CPAL audio library (device: {})", name))
                 }
                 None => Err(anyhow::anyhow!(
@@ -203,8 +203,11 @@ impl AudioRecorder {
 
                 let mut device_names = Vec::new();
                 for device in devices {
-                    if let Ok(name) = device.name() {
-                        device_names.push(name);
+                    // description() rather than the old name(): a device whose
+                    // description cannot be read is skipped, as its name could
+                    // not be before.
+                    if let Ok(description) = device.description() {
+                        device_names.push(description.name().to_string());
                     }
                 }
 
@@ -237,7 +240,7 @@ impl AudioRecorder {
         let device = host.default_input_device()
             .context("No default input device available")?;
 
-        let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+        let name = device_name(&device);
         info!("Using audio device: {}", name);
 
         self.device = Some(device);
@@ -447,9 +450,12 @@ impl AudioRecorder {
         }
 
         // Configure audio stream
+        //
+        // cpal 0.18 made SampleRate a plain `u32` alias rather than a newtype,
+        // so the rate goes in unwrapped.
         let config = StreamConfig {
             channels: self.config.channels,
-            sample_rate: SampleRate(self.config.sample_rate),
+            sample_rate: self.config.sample_rate,
             buffer_size: BufferSize::Fixed(self.config.buffer_size as u32),
         };
 
@@ -475,8 +481,9 @@ impl AudioRecorder {
         let max_duration = self.config.max_duration;
         let verbose = self.config.verbose;
 
+        // config by value: build_input_stream took a reference in 0.15.
         let stream = device.build_input_stream(
-            &config,
+            config,
             move |data: &[i16], _: &cpal::InputCallbackInfo| {
                 let mut writer_guard = writer_clone.lock().unwrap();
                 if let Some(ref mut writer) = *writer_guard {
@@ -680,6 +687,20 @@ fn generate_recording_id() -> String {
         .hash(&mut hasher);
     
     format!("rec_{:08x}", (hasher.finish() as u32))
+}
+
+/// A device's name, or "Unknown" when the host will not say.
+///
+/// cpal 0.18 replaced `Device::name()` with `description()`, which returns the
+/// name alongside manufacturer, driver and interface details. Only the name is
+/// wanted here, and in all three places that ask, a device that cannot report
+/// one is still worth listing or recording from -- so the error collapses to a
+/// placeholder rather than propagating.
+fn device_name(device: &Device) -> String {
+    device
+        .description()
+        .map(|description| description.name().to_string())
+        .unwrap_or_else(|_| "Unknown".to_string())
 }
 
 /// Extract recording ID from file path

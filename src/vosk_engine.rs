@@ -979,7 +979,7 @@ impl VoskEngine {
         S: std::future::Future<Output = ()>,
     {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-        use cpal::{SampleRate, StreamConfig};
+        use cpal::StreamConfig;
         use std::sync::mpsc;
 
         // Suppress Vosk's internal debug messages
@@ -999,9 +999,10 @@ impl VoskEngine {
         let device = host.default_input_device()
             .ok_or_else(|| anyhow::anyhow!("No input device available"))?;
 
+        // SampleRate is a `u32` alias in cpal 0.18, not a newtype.
         let config = StreamConfig {
             channels: 1,
-            sample_rate: SampleRate(16000),
+            sample_rate: 16000,
             buffer_size: cpal::BufferSize::Fixed(1024),
         };
 
@@ -1010,7 +1011,7 @@ impl VoskEngine {
 
         // Build input stream
         let stream = device.build_input_stream(
-            &config,
+            config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 // Convert f32 samples to i16
                 let samples: Vec<i16> = data.iter()

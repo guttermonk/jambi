@@ -13,7 +13,7 @@ default-run = "jambi"
 
 [dependencies]
 # Audio recording
-cpal = "0.15"
+cpal = "0.18"
 hound = "3.5"
 
 # Async runtime

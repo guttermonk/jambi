@@ -287,8 +287,11 @@ pub fn get_best_device() -> &'static str {
 /// Application-wide error type
 #[derive(thiserror::Error, Debug)]
 pub enum JambiError {
+    // cpal 0.18 collapsed BuildStreamError, DevicesError, DeviceNameError and
+    // the rest into one Error carrying an ErrorKind, so there is a single
+    // variant to convert from rather than one per failure mode.
     #[error("Audio error: {0}")]
-    Audio(#[from] cpal::BuildStreamError),
+    Audio(#[from] cpal::Error),
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
