@@ -48,11 +48,21 @@
           #
           # No openssl: reqwest 0.13 moved to rustls, so nothing in the tree
           # links it any more -- openssl-sys is gone from Cargo.lock entirely.
-          # TLS now comes from aws-lc-rs via rustls, which builds from vendored
-          # source rather than wanting a system library here.
+          # TLS comes from aws-lc-rs via rustls instead, which is why aws-lc is
+          # below.
+          #
+          # That line used to say aws-lc-rs "builds from vendored source rather
+          # than wanting a system library here", and it was true until nixpkgs
+          # took the choice away. cargoUseSystemLibs() in
+          # pkgs/build-support/rust/hooks/cargo-setup-hook.sh now exports
+          # AWS_LC_SYS_USE_SYSTEM=1 for every buildRustPackage, unconditionally
+          # via preConfigureHooks, so aws-lc-sys looks for a system AWS-LC and
+          # its build script panics outright when there is none -- it has no
+          # fallback to vendoring. The hook had no such line before 2026-11.
           #
           # No bzip2 either: it came in through zip's default features, which
           # the security bump turned off in favour of deflate alone.
+          aws-lc
           pkg-config
           stdenv.cc.cc
 
