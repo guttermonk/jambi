@@ -825,8 +825,10 @@ async fn run_interactive_mode(config: AppConfig, auto_copy: bool, verbose: bool)
         print!("Enter choice (R/T/M/Q): ");
         io::stdout().flush()?;
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+        let Some(input) = read_line_or_eof()? else {
+            println!("👋 Goodbye!");
+            break;
+        };
 
         match input.trim().to_uppercase().as_str() {
             "R" | "RECORD" => {
@@ -911,6 +913,23 @@ async fn record_and_transcribe(
     }
 
     Ok(())
+}
+
+/// Read a line from stdin, or `None` once input has ended.
+///
+/// `read_line` reports end of input as `Ok(0)` and leaves the buffer empty,
+/// which is indistinguishable from someone pressing Enter unless the count is
+/// checked. The interactive loops below did not check it, so anything that
+/// closed stdin -- a pipe, a script, a terminal going away -- left them
+/// spinning on an empty answer forever. In `record` that meant starting and
+/// finalising a recording every iteration: about 27000 files in fifteen
+/// seconds, each a 44-byte WAV header.
+fn read_line_or_eof() -> Result<Option<String>> {
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(line))
 }
 
 /// Transcribe an existing file interactively
@@ -1023,8 +1042,10 @@ async fn run_recording_session(
         if !auto_start {
             print!("🚦 Press Enter to start recording...");
             io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
+            if read_line_or_eof()?.is_none() {
+                println!();
+                break;
+            }
         }
 
         // Perform recording/transcription based on mode
@@ -1072,9 +1093,11 @@ async fn run_recording_session(
 
         // Ask user if they want to continue or quit
         println!("\n➡️ Press 'q' to quit or Enter to record again...");
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        
+        let Some(input) = read_line_or_eof()? else {
+            println!("👋 Goodbye!");
+            break;
+        };
+
         if input.trim().to_lowercase() == "q" {
             println!("👋 Goodbye!");
             break;
